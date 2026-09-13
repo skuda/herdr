@@ -153,10 +153,6 @@ impl Default for EndpointCatalog {
 }
 
 impl EndpointCatalog {
-    pub(crate) fn load() -> Result<Self, String> {
-        Self::load_for_local_session(&crate::session::validated_local_session_name()?)
-    }
-
     pub(crate) fn load_profiles() -> Result<Vec<SavedSshEndpoint>, String> {
         // Live clients keep their own selection, independent of other attached clients.
         Self::load_raw().map(|catalog| catalog.ssh)
@@ -167,12 +163,28 @@ impl EndpointCatalog {
     }
 
     pub(crate) fn load_for_local_session(local_session: &str) -> Result<Self, String> {
-        Self::load_for_local_session_from_paths(
+        let mut catalog = Self::load_for_local_session_from_paths(
             &catalog_path(),
             &selection_path(),
             &scoped_selection_path(local_session)?,
             local_session,
-        )
+        )?;
+        catalog.ssh = catalog.profiles_for_local_session(local_session);
+        Ok(catalog)
+    }
+
+    pub(crate) fn load_profiles_for_local_session(
+        local_session: &str,
+    ) -> Result<Vec<SavedSshEndpoint>, String> {
+        Ok(Self::load_raw()?.profiles_for_local_session(local_session))
+    }
+
+    pub(crate) fn profiles_for_local_session(&self, local_session: &str) -> Vec<SavedSshEndpoint> {
+        self.ssh
+            .iter()
+            .filter(|profile| profile.locally_allowed_in(local_session))
+            .cloned()
+            .collect()
     }
 
     fn load_for_local_session_from_paths(

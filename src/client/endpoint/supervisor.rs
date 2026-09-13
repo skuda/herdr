@@ -490,4 +490,25 @@ mod tests {
         assert!(supervisors.record_status(&endpoint_id, 4, ClientEndpointStatus::Attention, now));
         assert!(supervisors.endpoints[&endpoint_id].next_attempt.is_none());
     }
+
+    #[test]
+    fn live_allowlist_reallow_does_not_restore_stale_generation() {
+        let now = Instant::now();
+        let mut profile = profile();
+        let id = ClientEndpointId::Ssh(profile.id.clone());
+        let mut supervisors = EndpointSupervisors::new(&[profile.clone()], now);
+        supervisors.endpoints.get_mut(&id).unwrap().generation = Some(7);
+        assert_eq!(supervisors.reconcile_profiles(&[], now), vec![id.clone()]);
+        assert!(!supervisors.record_status(&id, 7, ClientEndpointStatus::Online, now));
+        assert!(!supervisors.disconnected(&id, 7, now));
+        assert!(supervisors
+            .reconcile_profiles(&[profile.clone()], now)
+            .is_empty());
+        assert!(!supervisors.record_status(&id, 7, ClientEndpointStatus::Online, now));
+        assert_eq!(supervisors.endpoints[&id].generation, None);
+        assert_eq!(supervisors.endpoints[&id].next_attempt, Some(now));
+        profile.local_sessions = Some(vec!["default".into()]);
+        assert!(supervisors.reconcile_profiles(&[profile], now).is_empty());
+        assert_eq!(supervisors.endpoints[&id].generation, None);
+    }
 }

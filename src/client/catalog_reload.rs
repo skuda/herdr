@@ -12,12 +12,14 @@ pub(super) fn should_watch_profiles(
 pub(super) fn watch_profiles(
     event_tx: tokio::sync::mpsc::Sender<ClientLoopEvent>,
     should_quit: Arc<AtomicBool>,
+    local_session: String,
 ) {
     // One bounded read per second per client, independent of rendering and pane count.
     std::thread::spawn(move || {
         let mut previous = None;
         while !should_quit.load(Ordering::Acquire) {
-            let current = endpoint::EndpointCatalog::load_profiles();
+            let current =
+                endpoint::EndpointCatalog::load_profiles_for_local_session(&local_session);
             if previous.as_ref() != Some(&current) {
                 previous = Some(current.clone());
                 if event_tx
@@ -30,6 +32,40 @@ pub(super) fn watch_profiles(
             std::thread::sleep(Duration::from_secs(1));
         }
     });
+}
+
+#[derive(Default)]
+pub(super) struct PendingCatalog {
+    valid: Option<Vec<endpoint::SavedSshEndpoint>>,
+    error: Option<String>,
+}
+
+impl PendingCatalog {
+    pub(super) fn observe(&mut self, reload: Result<Vec<endpoint::SavedSshEndpoint>, String>) {
+        match reload {
+            Ok(profiles) => {
+                self.valid = Some(profiles);
+                self.error = None;
+            }
+            Err(error) => self.error = Some(error),
+        }
+    }
+
+    pub(super) fn has_valid(&self) -> bool {
+        self.valid.is_some()
+    }
+
+    pub(super) fn take_valid(&mut self) -> Option<Vec<endpoint::SavedSshEndpoint>> {
+        self.valid.take()
+    }
+
+    pub(super) fn take_error(&mut self) -> Option<String> {
+        self.error.take()
+    }
+}
+
+pub(super) fn should_spawn_due(pending_valid: bool) -> bool {
+    !pending_valid
 }
 
 // Only called between surface handoffs: removing a source must not invalidate an in-flight
@@ -290,5 +326,48 @@ mod tests {
         assert!(!should_watch_profiles(true, true, false, Some("default")));
         assert!(!should_watch_profiles(false, false, false, Some("default")));
         assert!(!should_watch_profiles(true, false, true, Some("default")));
+    }
+
+    #[test]
+    fn pending_catalog_interleavings_preserve_latest_valid_observation() {
+        let first = endpoint::SavedSshEndpoint::new("One", "one", "main").unwrap();
+        let second = endpoint::SavedSshEndpoint::new("Two", "two", "main").unwrap();
+        let mut pending = PendingCatalog::default();
+        pending.observe(Ok(vec![first.clone()]));
+        pending.observe(Ok(vec![second.clone()]));
+        pending.observe(Err("malformed".into()));
+        assert_eq!(pending.take_valid(), Some(vec![second.clone()]));
+        assert_eq!(pending.take_error(), Some("malformed".into()));
+
+        pending.observe(Err("first-error".into()));
+        assert!(pending.take_valid().is_none());
+        assert_eq!(pending.take_error(), Some("first-error".into()));
+
+        pending.observe(Err("stale".into()));
+        pending.observe(Ok(vec![first.clone()]));
+        assert!(pending.take_error().is_none());
+        assert_eq!(pending.take_valid(), Some(vec![first]));
+    }
+
+    #[test]
+    fn pending_valid_catalog_pauses_new_connection_attempts() {
+        let mut pending = PendingCatalog::default();
+        let spawn_count = std::cell::Cell::new(0);
+        let maybe_spawn = |pending: &PendingCatalog| {
+            if should_spawn_due(pending.has_valid()) {
+                spawn_count.set(spawn_count.get() + 1);
+            }
+        };
+        pending.observe(Ok(vec![endpoint::SavedSshEndpoint::new(
+            "One", "one", "main",
+        )
+        .unwrap()]));
+        maybe_spawn(&pending);
+        pending.observe(Err("later".into()));
+        maybe_spawn(&pending);
+        assert_eq!(spawn_count.get(), 0);
+        let _ = pending.take_valid();
+        maybe_spawn(&pending);
+        assert_eq!(spawn_count.get(), 1);
     }
 }

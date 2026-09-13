@@ -1638,3 +1638,23 @@ fn navigator_foreign_tab_selection_keeps_the_tab_target() {
         }] if activated == &endpoint_id && tab_id == "tab_1"
     ));
 }
+
+#[test]
+fn locally_allowed_disabled_rows_remain_visible_without_connections() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let mut profile = remote_profile();
+    profile.enabled = false;
+    profile.local_sessions = Some(vec!["default".into()]);
+    let mut catalog = crate::client::endpoint::EndpointCatalog::default();
+    catalog.ssh = vec![profile.clone()];
+    state.set_endpoint_catalog(&catalog.profiles_for_local_session("default"));
+    let remote = ClientEndpointId::Ssh(profile.id.clone());
+    assert_eq!(
+        state.endpoint_status(&remote),
+        Some(ClientEndpointStatus::Disabled)
+    );
+    profile.local_sessions = Some(vec!["tradingdroid".into()]);
+    catalog.ssh = vec![profile];
+    state.set_endpoint_catalog(&catalog.profiles_for_local_session("default"));
+    assert!(state.endpoint_status(&remote).is_none());
+}
