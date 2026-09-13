@@ -13,6 +13,7 @@ const MAX_CATALOG_BYTES: u64 = 64 * 1024;
 const MAX_PROFILES: usize = 64;
 const MAX_LABEL_BYTES: usize = 128;
 const MAX_TARGET_BYTES: usize = 1024;
+const MAX_LOCAL_SESSIONS: usize = 64;
 static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,6 +24,8 @@ pub(crate) struct SavedSshEndpoint {
     pub(crate) target: String,
     pub(crate) session: String,
     pub(crate) enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) local_sessions: Option<Vec<String>>,
 }
 
 impl SavedSshEndpoint {
@@ -37,9 +40,25 @@ impl SavedSshEndpoint {
             target: target.into(),
             session: session.into(),
             enabled: true,
+            local_sessions: None,
         };
         profile.validate()?;
         Ok(profile)
+    }
+
+    // Temporary S1 staging: production callers land in S4/S5.
+    #[cfg(test)]
+    pub(crate) fn locally_allowed_in(&self, local_session: &str) -> bool {
+        match &self.local_sessions {
+            None => true,
+            Some(sessions) => sessions.iter().any(|name| name == local_session),
+        }
+    }
+
+    // Temporary S1 staging: production callers land in S4/S5.
+    #[cfg(test)]
+    pub(crate) fn is_available_in(&self, local_session: &str) -> bool {
+        self.enabled && self.locally_allowed_in(local_session)
     }
 
     fn validate(&self) -> Result<(), String> {
@@ -67,8 +86,29 @@ impl SavedSshEndpoint {
             return Err("SSH target must not contain a password".into());
         }
         crate::session::validate_name(&self.session)?;
+        normalize_local_sessions(self.local_sessions.as_deref())?;
         Ok(())
     }
+}
+
+pub(crate) fn normalize_local_sessions(
+    sessions: Option<&[String]>,
+) -> Result<Option<Vec<String>>, String> {
+    let Some(sessions) = sessions else {
+        return Ok(None);
+    };
+    if sessions.len() > MAX_LOCAL_SESSIONS {
+        return Err(format!(
+            "SSH endpoint cannot list more than {MAX_LOCAL_SESSIONS} local sessions"
+        ));
+    }
+    for name in sessions {
+        crate::session::validate_name(name)?;
+    }
+    let mut normalized = sessions.to_vec();
+    normalized.sort();
+    normalized.dedup();
+    Ok(Some(normalized))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -125,6 +165,7 @@ impl EndpointCatalog {
                         path = %selection_path.display(),
                         "saved endpoint selection is absent or disabled; using Local"
                     );
+                    catalog.selected_profile = None;
                 }
             }
             Ok(None) => {}
@@ -134,7 +175,11 @@ impl EndpointCatalog {
                     path = %selection_path.display(),
                     "saved endpoint selection is unavailable; using Local"
                 );
+                catalog.selected_profile = None;
             }
+        }
+        if !catalog.embedded_selection_is_globally_valid() {
+            catalog.selected_profile = None;
         }
         Ok(catalog)
     }
@@ -244,6 +289,14 @@ impl EndpointCatalog {
     }
 
     fn validate(&self) -> Result<(), String> {
+        self.validate_profiles()?;
+        if !self.embedded_selection_is_globally_valid() {
+            return Err("selected SSH endpoint is absent or disabled in the catalog".into());
+        }
+        Ok(())
+    }
+
+    fn validate_profiles(&self) -> Result<(), String> {
         if self.version != CATALOG_VERSION {
             return Err(format!(
                 "unsupported endpoint catalog version {}; expected {CATALOG_VERSION}",
@@ -262,13 +315,41 @@ impl EndpointCatalog {
                 return Err(format!("duplicate endpoint profile id {}", profile.id));
             }
         }
-        if self.selected_profile.as_ref().is_some_and(|selected| {
-            !self
-                .ssh
-                .iter()
-                .any(|profile| &profile.id == selected && profile.enabled)
-        }) {
-            return Err("selected SSH endpoint is absent or disabled in the catalog".into());
+        Ok(())
+    }
+
+    fn embedded_selection_is_globally_valid(&self) -> bool {
+        self.selected_profile.as_ref().is_none_or(|selected| {
+            ProfileId::parse(selected.as_str()).is_ok()
+                && self
+                    .ssh
+                    .iter()
+                    .any(|profile| &profile.id == selected && profile.enabled)
+        })
+    }
+
+    // Temporary S1 staging: production callers land in S3.
+    #[cfg(test)]
+    fn resolved_embedded_selection(&self, local_session: &str) -> Option<&ProfileId> {
+        let selected = self.selected_profile.as_ref()?;
+        if ProfileId::parse(selected.as_str()).is_err() {
+            return None;
+        }
+        self.ssh
+            .iter()
+            .any(|profile| &profile.id == selected && profile.is_available_in(local_session))
+            .then_some(selected)
+    }
+
+    fn normalize_embedded_selection(&mut self) {
+        if !self.embedded_selection_is_globally_valid() {
+            self.selected_profile = None;
+        }
+    }
+
+    fn normalize_local_session_lists(&mut self) -> Result<(), String> {
+        for profile in &mut self.ssh {
+            profile.local_sessions = normalize_local_sessions(profile.local_sessions.as_deref())?;
         }
         Ok(())
     }
@@ -297,15 +378,19 @@ impl EndpointCatalog {
         if content.len() as u64 > MAX_CATALOG_BYTES {
             return Err("endpoint catalog exceeds the storage limit".into());
         }
-        let catalog: Self = serde_json::from_str(&content)
+        let mut catalog: Self = serde_json::from_str(&content)
             .map_err(|error| format!("stored endpoint catalog is invalid: {error}"))?;
-        catalog.validate()?;
+        catalog.validate_profiles()?;
+        catalog.normalize_local_session_lists()?;
         Ok(catalog)
     }
 
     fn store_to_path(&self, path: &Path) -> Result<(), String> {
-        self.validate()?;
-        let content = serde_json::to_vec_pretty(self)
+        let mut catalog = self.clone();
+        catalog.normalize_local_session_lists()?;
+        catalog.normalize_embedded_selection();
+        catalog.validate()?;
+        let content = serde_json::to_vec_pretty(&catalog)
             .map_err(|error| format!("failed to encode endpoint catalog: {error}"))?;
         store_private_json(path, &content, "endpoint catalog")
     }
@@ -406,6 +491,7 @@ mod tests {
         assert!(!encoded.contains("password"));
         assert!(!encoded.contains("private_key"));
         assert!(!encoded.contains("control_socket"));
+        assert!(!encoded.contains("local_sessions"));
         let loaded = EndpointCatalog::load_from_path(&path).unwrap();
         assert_eq!(loaded, catalog);
         assert_eq!(loaded.ssh[0].id, id);
@@ -531,6 +617,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(catalog_path.parent().unwrap());
         let mut catalog = EndpointCatalog::default();
         let id = catalog.add_ssh("Build", "build", "agents").unwrap();
+        assert!(catalog.select_ssh(&id));
         catalog.store_to_path(&catalog_path).unwrap();
         std::fs::write(&selection_path, b"not json").unwrap();
 
@@ -548,6 +635,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(catalog_path.parent().unwrap());
         let mut catalog = EndpointCatalog::default();
         let saved = catalog.add_ssh("Build", "build", "agents").unwrap();
+        assert!(catalog.select_ssh(&saved));
         catalog.store_to_path(&catalog_path).unwrap();
         let missing = ProfileId::parse("fedcba9876543210fedcba9876543210").unwrap();
         store_private_json(
@@ -567,12 +655,425 @@ mod tests {
         std::fs::remove_dir_all(catalog_path.parent().unwrap()).unwrap();
     }
 
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct LegacySavedSshEndpoint {
+        id: ProfileId,
+        label: String,
+        target: String,
+        session: String,
+        enabled: bool,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct LegacyEndpointCatalog {
+        version: u32,
+        #[serde(default)]
+        selected_profile: Option<ProfileId>,
+        #[serde(default)]
+        ssh: Vec<LegacySavedSshEndpoint>,
+    }
+
+    fn sample_profile(enabled: bool, local_sessions: Option<Vec<&str>>) -> SavedSshEndpoint {
+        let mut profile = SavedSshEndpoint::new("Build", "build", "agents").unwrap();
+        profile.enabled = enabled;
+        profile.local_sessions =
+            local_sessions.map(|names| names.into_iter().map(str::to_string).collect());
+        profile
+    }
+
+    fn write_catalog(path: &Path, body: &str) {
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+
     #[test]
-    fn invalid_or_missing_selected_profile_is_rejected() {
-        let catalog = EndpointCatalog {
-            selected_profile: Some(ProfileId::parse("0123456789abcdef0123456789abcdef").unwrap()),
+    fn local_availability_matrix() {
+        let cases = [
+            ("omitted-enabled-default", true, None, "default", true, true),
+            (
+                "omitted-enabled-tradingdroid",
+                true,
+                None,
+                "tradingdroid",
+                true,
+                true,
+            ),
+            (
+                "omitted-disabled-default",
+                false,
+                None,
+                "default",
+                true,
+                false,
+            ),
+            (
+                "omitted-disabled-tradingdroid",
+                false,
+                None,
+                "tradingdroid",
+                true,
+                false,
+            ),
+            (
+                "empty-enabled-default",
+                true,
+                Some(vec![]),
+                "default",
+                false,
+                false,
+            ),
+            (
+                "empty-enabled-tradingdroid",
+                true,
+                Some(vec![]),
+                "tradingdroid",
+                false,
+                false,
+            ),
+            (
+                "empty-disabled-default",
+                false,
+                Some(vec![]),
+                "default",
+                false,
+                false,
+            ),
+            (
+                "default-only-enabled-default",
+                true,
+                Some(vec!["default"]),
+                "default",
+                true,
+                true,
+            ),
+            (
+                "default-only-enabled-tradingdroid",
+                true,
+                Some(vec!["default"]),
+                "tradingdroid",
+                false,
+                false,
+            ),
+            (
+                "default-only-disabled-default",
+                false,
+                Some(vec!["default"]),
+                "default",
+                true,
+                false,
+            ),
+            (
+                "tradingdroid-only-enabled-default",
+                true,
+                Some(vec!["tradingdroid"]),
+                "default",
+                false,
+                false,
+            ),
+            (
+                "tradingdroid-only-enabled-tradingdroid",
+                true,
+                Some(vec!["tradingdroid"]),
+                "tradingdroid",
+                true,
+                true,
+            ),
+            (
+                "tradingdroid-only-disabled-tradingdroid",
+                false,
+                Some(vec!["tradingdroid"]),
+                "tradingdroid",
+                true,
+                false,
+            ),
+            (
+                "both-enabled-default",
+                true,
+                Some(vec!["default", "tradingdroid"]),
+                "default",
+                true,
+                true,
+            ),
+            (
+                "both-enabled-tradingdroid",
+                true,
+                Some(vec!["default", "tradingdroid"]),
+                "tradingdroid",
+                true,
+                true,
+            ),
+            (
+                "both-enabled-other",
+                true,
+                Some(vec!["default", "tradingdroid"]),
+                "other",
+                false,
+                false,
+            ),
+            (
+                "both-disabled-default",
+                false,
+                Some(vec!["default", "tradingdroid"]),
+                "default",
+                true,
+                false,
+            ),
+            (
+                "case-sensitive-default",
+                true,
+                Some(vec!["default"]),
+                "Default",
+                false,
+                false,
+            ),
+            (
+                "future-name-enabled",
+                true,
+                Some(vec!["not-created-yet"]),
+                "not-created-yet",
+                true,
+                true,
+            ),
+            (
+                "future-name-other-context",
+                true,
+                Some(vec!["not-created-yet"]),
+                "default",
+                false,
+                false,
+            ),
+        ];
+        for (name, enabled, sessions, context, allowed, available) in cases {
+            let profile = sample_profile(enabled, sessions);
+            assert_eq!(
+                profile.locally_allowed_in(context),
+                allowed,
+                "{name} locally_allowed_in"
+            );
+            assert_eq!(
+                profile.is_available_in(context),
+                available,
+                "{name} is_available_in"
+            );
+            assert_eq!(
+                profile.is_available_in(context),
+                enabled && profile.locally_allowed_in(context),
+                "{name} combined availability"
+            );
+        }
+    }
+
+    #[test]
+    fn local_sessions_normalize_and_enforce_input_bounds() {
+        let sorted = normalize_local_sessions(Some(&[
+            "tradingdroid".into(),
+            "default".into(),
+            "default".into(),
+        ]))
+        .unwrap();
+        assert_eq!(sorted, Some(vec!["default".into(), "tradingdroid".into()]));
+
+        let accepted: Vec<String> = (0..MAX_LOCAL_SESSIONS)
+            .map(|index| format!("session-{index:02}"))
+            .collect();
+        assert_eq!(
+            normalize_local_sessions(Some(&accepted))
+                .unwrap()
+                .unwrap()
+                .len(),
+            MAX_LOCAL_SESSIONS
+        );
+
+        let mut too_many = accepted.clone();
+        too_many.push("session-extra".into());
+        assert!(normalize_local_sessions(Some(&too_many))
+            .unwrap_err()
+            .contains(&MAX_LOCAL_SESSIONS.to_string()));
+
+        let mut duplicates_over_limit = vec!["default".into(); MAX_LOCAL_SESSIONS + 1];
+        assert!(normalize_local_sessions(Some(&duplicates_over_limit)).is_err());
+        duplicates_over_limit.pop();
+        assert_eq!(
+            normalize_local_sessions(Some(&duplicates_over_limit)).unwrap(),
+            Some(vec!["default".into()])
+        );
+
+        let max_name = "a".repeat(64);
+        assert_eq!(
+            normalize_local_sessions(Some(std::slice::from_ref(&max_name))).unwrap(),
+            Some(vec![max_name])
+        );
+        assert!(normalize_local_sessions(Some(&["a".repeat(65)])).is_err());
+        assert_eq!(normalize_local_sessions(None).unwrap(), None);
+        assert_eq!(
+            normalize_local_sessions(Some(&[])).unwrap(),
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn local_sessions_reject_invalid_names_and_json_shapes() {
+        let path = path("invalid-local-sessions");
+        for (name, extra) in [
+            ("empty", r#", "local_sessions": [""]"#),
+            ("dot", r#", "local_sessions": ["."]"#),
+            ("dotdot", r#", "local_sessions": [".."]"#),
+            ("slash", r#", "local_sessions": ["a/b"]"#),
+            ("whitespace", r#", "local_sessions": ["a b"]"#),
+            ("control", ", \"local_sessions\": [\"a\\n\"]"),
+            ("non-ascii", r#", "local_sessions": ["café"]"#),
+            ("wildcard", r#", "local_sessions": ["*"]"#),
+            ("scalar", r#", "local_sessions": "default""#),
+            ("object", r#", "local_sessions": {"default": true}"#),
+            ("mixed", r#", "local_sessions": ["default", 1]"#),
+        ] {
+            write_catalog(
+                &path,
+                &format!(
+                    r#"{{
+                      "version": 1,
+                      "ssh": [{{
+                        "id": "0123456789abcdef0123456789abcdef",
+                        "label": "Build",
+                        "target": "build",
+                        "session": "default",
+                        "enabled": true{extra}
+                      }}]
+                    }}"#
+                ),
+            );
+            let error = EndpointCatalog::load_from_path(&path).unwrap_err();
+            assert!(
+                error.contains("session name")
+                    || error.contains("stored endpoint catalog is invalid"),
+                "{name}: {error}"
+            );
+        }
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn restricted_catalog_rejects_legacy_strict_reader() {
+        let mut catalog = EndpointCatalog::default();
+        catalog.add_ssh("Build", "build", "agents").unwrap();
+        let unrestricted = serde_json::to_value(&catalog).unwrap();
+        assert!(unrestricted["ssh"][0].get("local_sessions").is_none());
+        let legacy = serde_json::from_value::<LegacyEndpointCatalog>(unrestricted.clone()).unwrap();
+        assert_eq!(legacy.version, 1);
+        assert_eq!(legacy.ssh.len(), 1);
+        assert_eq!(legacy.ssh[0].id, catalog.ssh[0].id);
+        assert_eq!(legacy.ssh[0].label, "Build");
+        assert_eq!(legacy.ssh[0].target, "build");
+        assert_eq!(legacy.ssh[0].session, "agents");
+        assert!(legacy.ssh[0].enabled);
+        assert_eq!(legacy.selected_profile, None);
+
+        catalog.ssh[0].local_sessions = Some(Vec::new());
+        let empty = serde_json::to_value(&catalog).unwrap();
+        assert_eq!(empty["ssh"][0]["local_sessions"], serde_json::json!([]));
+        assert!(serde_json::from_value::<LegacyEndpointCatalog>(empty)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown field `local_sessions`"));
+
+        catalog.ssh[0].local_sessions = Some(vec!["default".into()]);
+        let restricted = serde_json::to_value(&catalog).unwrap();
+        assert!(serde_json::from_value::<LegacyEndpointCatalog>(restricted)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown field `local_sessions`"));
+
+        catalog.ssh[0].local_sessions = None;
+        let cleared = serde_json::to_value(&catalog).unwrap();
+        assert!(cleared["ssh"][0].get("local_sessions").is_none());
+        serde_json::from_value::<LegacyEndpointCatalog>(cleared).unwrap();
+    }
+
+    #[test]
+    fn stale_embedded_selection_preserves_valid_profiles() {
+        let path = path("stale-embedded");
+        let profile_id = "0123456789abcdef0123456789abcdef";
+        let present = SavedSshEndpoint {
+            id: ProfileId::parse(profile_id).unwrap(),
+            label: "Build".into(),
+            target: "build".into(),
+            session: "default".into(),
+            enabled: true,
+            local_sessions: Some(vec!["default".into()]),
+        };
+
+        write_catalog(
+            &path,
+            r#"{
+              "version": 1,
+              "selected_profile": "not-a-profile-id",
+              "ssh": [{
+                "id": "0123456789abcdef0123456789abcdef",
+                "label": "Build",
+                "target": "build",
+                "session": "default",
+                "enabled": true
+              }]
+            }"#,
+        );
+        let malformed = EndpointCatalog::load_from_path(&path).unwrap();
+        assert_eq!(malformed.ssh.len(), 1);
+        assert_eq!(malformed.ssh[0].id.as_str(), profile_id);
+        assert!(malformed.resolved_embedded_selection("default").is_none());
+        assert!(malformed.validate().is_err());
+        assert!(malformed.validate_profiles().is_ok());
+        let original = std::fs::read(&path).unwrap();
+        let _ = EndpointCatalog::load_from_path(&path).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+
+        let disabled = EndpointCatalog {
+            selected_profile: Some(present.id.clone()),
+            ssh: vec![SavedSshEndpoint {
+                enabled: false,
+                local_sessions: None,
+                ..present.clone()
+            }],
             ..EndpointCatalog::default()
         };
-        assert!(catalog.validate().is_err());
+        assert!(disabled.validate_profiles().is_ok());
+        assert!(disabled.validate().is_err());
+        assert!(disabled.resolved_embedded_selection("default").is_none());
+
+        let absent = EndpointCatalog {
+            selected_profile: Some(ProfileId::parse("fedcba9876543210fedcba9876543210").unwrap()),
+            ssh: vec![present.clone()],
+            ..EndpointCatalog::default()
+        };
+        assert!(absent.validate_profiles().is_ok());
+        assert!(absent.resolved_embedded_selection("default").is_none());
+
+        let disallowed = EndpointCatalog {
+            selected_profile: Some(present.id.clone()),
+            ssh: vec![present],
+            ..EndpointCatalog::default()
+        };
+        assert!(disallowed.validate_profiles().is_ok());
+        assert!(disallowed.validate().is_ok());
+        assert!(disallowed.embedded_selection_is_globally_valid());
+        assert!(disallowed.resolved_embedded_selection("default").is_some());
+        assert!(disallowed
+            .resolved_embedded_selection("tradingdroid")
+            .is_none());
+
+        disallowed.store_to_path(&path).unwrap();
+        let reloaded = EndpointCatalog::load_from_path(&path).unwrap();
+        assert_eq!(
+            reloaded.selected_profile.as_ref().map(ProfileId::as_str),
+            Some(profile_id)
+        );
+
+        disabled.store_to_path(&path).unwrap();
+        let normalized = EndpointCatalog::load_from_path(&path).unwrap();
+        assert_eq!(normalized.ssh.len(), 1);
+        assert_eq!(normalized.selected_profile, None);
+        std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 }

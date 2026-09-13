@@ -445,6 +445,21 @@ pub fn validate_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+// Temporary S1 staging: production callers land in S4/S5.
+#[cfg(test)]
+pub fn validated_local_session_name() -> Result<String, String> {
+    match std::env::var_os(SESSION_ENV_VAR) {
+        None => Ok(DEFAULT_SESSION_NAME.to_string()),
+        Some(value) => {
+            let Some(name) = value.to_str() else {
+                return Err(format!("{SESSION_ENV_VAR} is not valid Unicode"));
+            };
+            validate_name(name)?;
+            Ok(name.to_string())
+        }
+    }
+}
+
 fn apply_explicit_name(name: &str) -> Result<(), String> {
     let session = normalize_name(name)?;
     if let Some(session) = session {
@@ -956,10 +971,63 @@ mod tests {
         assert!(!explicit_session_requested());
         assert_eq!(active_api_socket_path(), PathBuf::from("/tmp/herdr.sock"));
         assert_eq!(std::env::var(SESSION_ENV_VAR).as_deref(), Ok("bad/name"));
+        assert!(validated_local_session_name().is_err());
 
         std::env::remove_var(SESSION_ENV_VAR);
         clear_explicit_session_for_test();
         std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
+    }
+
+    #[test]
+    fn validated_local_session_name_uses_default_when_unset() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::remove_var(SESSION_ENV_VAR);
+
+        assert_eq!(
+            validated_local_session_name().unwrap(),
+            DEFAULT_SESSION_NAME
+        );
+    }
+
+    #[test]
+    fn validated_local_session_name_keeps_literal_default_and_named_sessions() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::set_var(SESSION_ENV_VAR, DEFAULT_SESSION_NAME);
+        assert_eq!(
+            validated_local_session_name().unwrap(),
+            DEFAULT_SESSION_NAME
+        );
+
+        std::env::set_var(SESSION_ENV_VAR, "tradingdroid");
+        assert_eq!(validated_local_session_name().unwrap(), "tradingdroid");
+
+        std::env::set_var(SESSION_ENV_VAR, "Default");
+        assert_eq!(validated_local_session_name().unwrap(), "Default");
+
+        std::env::remove_var(SESSION_ENV_VAR);
+    }
+
+    #[test]
+    fn validated_local_session_name_rejects_empty_invalid_and_non_unicode() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::set_var(SESSION_ENV_VAR, "");
+        assert!(validated_local_session_name()
+            .unwrap_err()
+            .contains("cannot be empty"));
+
+        std::env::set_var(SESSION_ENV_VAR, "bad/name");
+        assert!(validated_local_session_name().is_err());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt as _;
+            std::env::set_var(SESSION_ENV_VAR, std::ffi::OsString::from_vec(vec![0xff]));
+            assert!(validated_local_session_name()
+                .unwrap_err()
+                .contains("not valid Unicode"));
+        }
+
+        std::env::remove_var(SESSION_ENV_VAR);
     }
 
     #[cfg(unix)]
