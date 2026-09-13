@@ -191,6 +191,18 @@ impl EndpointCatalog {
         Ok(catalog)
     }
 
+    pub(crate) fn selected_profile_for_local_session(
+        &self,
+        local_session: &str,
+    ) -> Option<ProfileId> {
+        resolve_selected_profile(
+            self,
+            local_session,
+            &scoped_selection_path(local_session).ok()?,
+            &selection_path(),
+        )
+    }
+
     fn persist_explicit_selection_to_path(
         &mut self,
         endpoint_id: &super::ClientEndpointId,
@@ -450,6 +462,18 @@ impl EndpointCatalog {
             self.selected_profile = None;
         }
         true
+    }
+
+    pub(crate) fn set_local_sessions(
+        &mut self,
+        id: &ProfileId,
+        local_sessions: Option<Vec<String>>,
+    ) -> Result<bool, String> {
+        let Some(profile) = self.ssh.iter_mut().find(|profile| &profile.id == id) else {
+            return Ok(false);
+        };
+        profile.local_sessions = normalize_local_sessions(local_sessions.as_deref())?;
+        Ok(true)
     }
 
     fn validate(&self) -> Result<(), String> {

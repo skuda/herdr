@@ -166,6 +166,50 @@ impl Harness {
             .to_string_lossy()
             .starts_with("herdr-api-")));
     }
+
+    fn assert_no_machine_connection(&self) {
+        self.assert_local_untouched();
+        assert!(!self.root.join("ssh-args").exists());
+        assert_eq!(
+            self.remote.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    fn catalog_path(&self) -> PathBuf {
+        let app = if cfg!(debug_assertions) {
+            "herdr-dev"
+        } else {
+            "herdr"
+        };
+        self.root.join("state").join(app).join("client")
+    }
+
+    fn write_catalog(&self, body: Value) {
+        fs::write(
+            self.catalog_path().join("endpoints.json"),
+            serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn write_selection(&self, name: &str, body: Value) {
+        let dir = self.catalog_path().join("endpoint-selections");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join(format!("{name}.json")),
+            serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn write_legacy_selection(&self, body: Value) {
+        fs::write(
+            self.catalog_path().join("endpoint-selection.json"),
+            serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap();
+    }
 }
 
 impl Drop for Harness {
@@ -401,4 +445,199 @@ fn machine_api_protocol_mismatch_never_sends_the_mutation() {
     assert!(error.contains("machine 'mac'"), "{error}");
     assert!(!error.contains("HERDR_SOCKET_PATH="), "{error}");
     harness.assert_local_untouched();
+}
+
+#[test]
+fn machine_api_rejects_disallowed_and_invalid_context_without_ssh() {
+    let harness = Harness::new();
+    harness.write_catalog(json!({
+        "version": 1,
+        "ssh": [{
+            "id": PROFILE_ID,
+            "label": "mac",
+            "target": "fake-mac",
+            "session": "fleet",
+            "enabled": true,
+            "local_sessions": ["default"]
+        }]
+    }));
+
+    let disallowed = harness
+        .command(&["--machine", "mac", "agent", "list"])
+        .env("HERDR_SESSION", "tradingdroid")
+        .output()
+        .unwrap();
+    assert_eq!(disallowed.status.code(), Some(2));
+    let disallowed_err = String::from_utf8_lossy(&disallowed.stderr);
+    assert!(
+        disallowed_err.contains("not available in local session tradingdroid"),
+        "{disallowed_err}"
+    );
+    assert!(
+        disallowed_err.contains("machine availability"),
+        "{disallowed_err}"
+    );
+    harness.assert_no_machine_connection();
+
+    let invalid = harness
+        .command(&["--machine", "mac", "agent", "list"])
+        .env("HERDR_SESSION", "bad/name")
+        .output()
+        .unwrap();
+    assert_eq!(invalid.status.code(), Some(2));
+    let invalid_err = String::from_utf8_lossy(&invalid.stderr);
+    assert!(invalid_err.contains("session name"), "{invalid_err}");
+    harness.assert_no_machine_connection();
+}
+
+#[test]
+fn machine_api_disabled_and_ambiguous_errors_precede_availability() {
+    let harness = Harness::new();
+    harness.write_catalog(json!({
+        "version": 1,
+        "ssh": [
+            {
+                "id": PROFILE_ID,
+                "label": "mac",
+                "target": "fake-mac",
+                "session": "fleet",
+                "enabled": false,
+                "local_sessions": ["default"]
+            },
+            {
+                "id": "fedcba9876543210fedcba9876543210",
+                "label": "mac",
+                "target": "other-mac",
+                "session": "fleet",
+                "enabled": true,
+                "local_sessions": ["default"]
+            }
+        ]
+    }));
+    let disabled = harness
+        .command(&["--machine", PROFILE_ID, "agent", "list"])
+        .env("HERDR_SESSION", "tradingdroid")
+        .output()
+        .unwrap();
+    assert_eq!(disabled.status.code(), Some(2));
+    let disabled_err = String::from_utf8_lossy(&disabled.stderr);
+    assert!(disabled_err.contains("is disabled"), "{disabled_err}");
+    assert!(!disabled_err.contains("not available"), "{disabled_err}");
+
+    let ambiguous = harness
+        .command(&["--machine", "mac", "agent", "list"])
+        .env("HERDR_SESSION", "tradingdroid")
+        .output()
+        .unwrap();
+    assert_eq!(ambiguous.status.code(), Some(2));
+    let ambiguous_err = String::from_utf8_lossy(&ambiguous.stderr);
+    assert!(ambiguous_err.contains("ambiguous"), "{ambiguous_err}");
+    harness.assert_no_machine_connection();
+}
+
+#[test]
+fn machine_list_json_uses_raw_profiles_and_scoped_preference() {
+    let harness = Harness::new();
+    let enabled_id = PROFILE_ID;
+    let disabled_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let disallowed_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    harness.write_catalog(json!({
+        "version": 1,
+        "selected_profile": enabled_id,
+        "ssh": [
+            {
+                "id": enabled_id,
+                "label": "one",
+                "target": "one",
+                "session": "fleet",
+                "enabled": true,
+                "local_sessions": ["default", "tradingdroid"]
+            },
+            {
+                "id": disabled_id,
+                "label": "two",
+                "target": "two",
+                "session": "fleet",
+                "enabled": false
+            },
+            {
+                "id": disallowed_id,
+                "label": "three",
+                "target": "three",
+                "session": "fleet",
+                "enabled": true,
+                "local_sessions": ["tradingdroid"]
+            }
+        ]
+    }));
+    harness.write_legacy_selection(json!({
+        "version": 1,
+        "selected_profile": disallowed_id
+    }));
+    harness.write_selection("default", json!({"version": 1, "selected_profile": null}));
+    let catalog_before = fs::read(harness.catalog_path().join("endpoints.json")).unwrap();
+    let legacy_before = fs::read(harness.catalog_path().join("endpoint-selection.json")).unwrap();
+    let scoped_before = fs::read(
+        harness
+            .catalog_path()
+            .join("endpoint-selections/default.json"),
+    )
+    .unwrap();
+    assert!(!harness
+        .catalog_path()
+        .join("endpoint-selections/tradingdroid.json")
+        .exists());
+
+    let default_list = success(
+        harness
+            .command(&["machine", "list", "--json"])
+            .env_remove("HERDR_SESSION")
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(default_list.as_array().unwrap().len(), 3);
+    assert_eq!(default_list[0]["id"], enabled_id);
+    assert_eq!(default_list[0]["available"], true);
+    assert_eq!(default_list[0]["selected"], false);
+    assert_eq!(default_list[1]["id"], disabled_id);
+    assert_eq!(default_list[1]["available"], false);
+    assert_eq!(default_list[1]["selected"], false);
+    assert_eq!(default_list[2]["id"], disallowed_id);
+    assert_eq!(default_list[2]["available"], false);
+    assert_eq!(default_list[2]["selected"], false);
+
+    let named_list = success(
+        harness
+            .command(&["machine", "list", "--json"])
+            .env("HERDR_SESSION", "tradingdroid")
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(named_list[0]["available"], true);
+    assert_eq!(named_list[0]["selected"], false);
+    assert_eq!(named_list[1]["available"], false);
+    assert_eq!(named_list[2]["available"], true);
+    assert_eq!(named_list[2]["selected"], false);
+
+    assert_eq!(
+        fs::read(harness.catalog_path().join("endpoints.json")).unwrap(),
+        catalog_before
+    );
+    assert_eq!(
+        fs::read(harness.catalog_path().join("endpoint-selection.json")).unwrap(),
+        legacy_before
+    );
+    assert_eq!(
+        fs::read(
+            harness
+                .catalog_path()
+                .join("endpoint-selections/default.json")
+        )
+        .unwrap(),
+        scoped_before
+    );
+    assert!(!harness
+        .catalog_path()
+        .join("endpoint-selections/tradingdroid.json")
+        .exists());
 }

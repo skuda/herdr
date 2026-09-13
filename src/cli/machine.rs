@@ -9,12 +9,19 @@ const HELP: &str = "Usage:
   herdr machine remove <profile-id>
   herdr machine enable <profile-id>
   herdr machine disable <profile-id>
+  herdr machine availability <profile-id> --local-session <name> [--local-session <name> ...]
+  herdr machine availability <profile-id> --all-local-sessions
+  herdr machine availability <profile-id> --no-local-sessions
 
 Add prepares the remote Herdr installation and starts its server before saving.
 Missing or incompatible installations require approval in an interactive terminal.
 Changes apply automatically to open local Herdr clients.
 Removing or disabling a machine leaves its remote sessions running.
-Saved machines contain only a label, SSH target, explicit Herdr session, and enabled state.
+Availability limits which local sessions can use a saved machine.
+List columns are id, label, target, session, enabled, availability, available, and selected.
+Availability is all, none, or the allowed local session names.
+Available and selected are for the current local session.
+Saved machines contain only a label, SSH target, explicit Herdr session, enabled state, and optional local-session list.
 SSH credentials and key material remain owned by OpenSSH.";
 
 #[derive(Serialize)]
@@ -25,6 +32,8 @@ struct MachineListRow<'a> {
     session: &'a str,
     enabled: bool,
     selected: bool,
+    local_sessions: Option<&'a [String]>,
+    available: bool,
 }
 
 pub(super) fn run_machine_command(args: &[String]) -> std::io::Result<i32> {
@@ -35,6 +44,7 @@ pub(super) fn run_machine_command(args: &[String]) -> std::io::Result<i32> {
         Some("remove") => remove(&args[1..]),
         Some("enable") => set_enabled(&args[1..], true),
         Some("disable") => set_enabled(&args[1..], false),
+        Some("availability") => set_availability(&args[1..]),
         Some("help" | "--help" | "-h") => {
             println!("{HELP}");
             Ok(0)
@@ -56,6 +66,9 @@ fn list(args: &[String]) -> std::io::Result<i32> {
         }
     };
     let catalog = load_raw_catalog()?;
+    let local_session = crate::session::validated_local_session_name()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    let selected = catalog.selected_profile_for_local_session(&local_session);
     let rows = catalog
         .ssh
         .iter()
@@ -65,7 +78,9 @@ fn list(args: &[String]) -> std::io::Result<i32> {
             target: &profile.target,
             session: &profile.session,
             enabled: profile.enabled,
-            selected: catalog.selected_profile.as_ref() == Some(&profile.id),
+            selected: selected.as_ref() == Some(&profile.id),
+            local_sessions: profile.local_sessions.as_deref(),
+            available: profile.is_available_in(&local_session),
         })
         .collect::<Vec<_>>();
     if json {
@@ -81,9 +96,24 @@ fn list(args: &[String]) -> std::io::Result<i32> {
     }
     for row in rows {
         let state = if row.enabled { "enabled" } else { "disabled" };
+        let availability = match row.local_sessions {
+            None => "all".to_owned(),
+            Some([]) => "none".to_owned(),
+            Some(names) => names.join(","),
+        };
+        let available = if row.available {
+            "available"
+        } else {
+            "unavailable"
+        };
+        let selected = if row.selected {
+            "selected"
+        } else {
+            "unselected"
+        };
         println!(
-            "{}\t{}\t{}\t{}\t{}",
-            row.id, row.label, row.target, row.session, state
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+            row.id, row.label, row.target, row.session, state, availability, available, selected
         );
     }
     Ok(0)
@@ -254,6 +284,97 @@ fn set_enabled(args: &[String], enabled: bool) -> std::io::Result<i32> {
     Ok(0)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum AvailabilityArgs {
+    Sessions(Vec<String>),
+    All,
+    None,
+}
+
+fn parse_availability_args(args: &[String]) -> Result<(ProfileId, AvailabilityArgs), String> {
+    let usage = "usage: herdr machine availability <profile-id> --local-session <name> [--local-session <name> ...] | --all-local-sessions | --no-local-sessions";
+    let Some((raw_id, rest)) = args.split_first() else {
+        return Err(usage.into());
+    };
+    if raw_id.starts_with('-') {
+        return Err(usage.into());
+    }
+    let id = ProfileId::parse(raw_id.clone())?;
+    let mut sessions = Vec::new();
+    let mut all = false;
+    let mut none = false;
+    let mut index = 0;
+    while index < rest.len() {
+        let arg = rest[index].as_str();
+        if let Some(value) = arg.strip_prefix("--local-session=") {
+            crate::session::validate_name(value)?;
+            sessions.push(value.to_string());
+            index += 1;
+            continue;
+        }
+        match arg {
+            "--local-session" => {
+                let Some(value) = rest.get(index + 1) else {
+                    return Err("missing value for --local-session".into());
+                };
+                if value.starts_with('-') {
+                    return Err("missing value for --local-session".into());
+                }
+                crate::session::validate_name(value)?;
+                sessions.push(value.clone());
+                index += 2;
+            }
+            "--all-local-sessions" if !all => {
+                all = true;
+                index += 1;
+            }
+            "--no-local-sessions" if !none => {
+                none = true;
+                index += 1;
+            }
+            "--all-local-sessions" | "--no-local-sessions" => {
+                return Err(format!("{arg} can only be specified once"));
+            }
+            unknown => return Err(format!("unknown machine availability option: {unknown}")),
+        }
+    }
+    let form_count = usize::from(!sessions.is_empty()) + usize::from(all) + usize::from(none);
+    let availability = match (sessions.is_empty(), all, none, form_count) {
+        (false, false, false, 1) => AvailabilityArgs::Sessions(sessions),
+        (true, true, false, 1) => AvailabilityArgs::All,
+        (true, false, true, 1) => AvailabilityArgs::None,
+        _ => return Err(usage.into()),
+    };
+    Ok((id, availability))
+}
+
+fn set_availability(args: &[String]) -> std::io::Result<i32> {
+    let (id, availability) = match parse_availability_args(args) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            eprintln!("{error}");
+            return Ok(2);
+        }
+    };
+    let local_sessions = match availability {
+        AvailabilityArgs::All => None,
+        AvailabilityArgs::None => Some(Vec::new()),
+        AvailabilityArgs::Sessions(names) => Some(names),
+    };
+    match EndpointCatalog::update_profiles(|catalog| {
+        match catalog.set_local_sessions(&id, local_sessions) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(format!("machine profile {id} was not found")),
+            Err(error) => Err(error),
+        }
+    }) {
+        Ok(()) => {}
+        Err(error) => return map_update_error(error),
+    }
+    println!("Updated SSH machine {id} availability.");
+    Ok(0)
+}
+
 fn one_profile_id(args: &[String], usage: &str) -> std::io::Result<Option<ProfileId>> {
     let [raw] = args else {
         eprintln!("{usage}");
@@ -370,9 +491,67 @@ mod tests {
             session: "agents",
             enabled: true,
             selected: false,
+            local_sessions: None,
+            available: true,
         })
         .unwrap();
         assert!(!encoded.contains("password"));
         assert!(!encoded.contains("key"));
+        assert!(encoded.contains("local_sessions"));
+        assert!(encoded.contains("available"));
+    }
+
+    #[test]
+    fn availability_parser_matches_spec() {
+        let id = "0123456789abcdef0123456789abcdef";
+        let cases: &[(&[&str], bool)] = &[
+            (
+                &[
+                    id,
+                    "--local-session",
+                    "default",
+                    "--local-session=tradingdroid",
+                ],
+                true,
+            ),
+            (&[id, "--all-local-sessions"], true),
+            (&[id, "--no-local-sessions"], true),
+            (&[id, "--local-session=-dev"], true),
+            (&[id, "--local-session", "--all-local-sessions"], false),
+            (&[id, "--local-session", "--no-local-sessions"], false),
+            (&[id, "--local-session", "-dev"], false),
+            (&[id, "--all-local-sessions", "--no-local-sessions"], false),
+            (&[id, "--all-local-sessions", "--all-local-sessions"], false),
+            (&[id, "--no-local-sessions", "--no-local-sessions"], false),
+            (
+                &[id, "--all-local-sessions", "--local-session", "default"],
+                false,
+            ),
+            (&[id, "--local-session", "bad/name"], false),
+            (&[id], false),
+            (&[id, "--local-session"], false),
+            (&["Build", "--all-local-sessions"], false),
+            (&[id, "--all-local-sessions", "extra"], false),
+            (&["--all-local-sessions"], false),
+        ];
+        for (args, accepted) in cases {
+            let owned: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+            let runtime = parse_availability_args(&owned);
+            let mut spec_args = vec![
+                "herdr".to_string(),
+                "machine".to_string(),
+                "availability".to_string(),
+            ];
+            spec_args.extend(owned.clone());
+            let spec = crate::cli::spec_command().try_get_matches_from(spec_args);
+            assert_eq!(runtime.is_ok(), *accepted, "runtime {args:?}");
+            assert_eq!(spec.is_ok(), *accepted, "spec {args:?}");
+        }
+        assert_eq!(
+            parse_availability_args(&[id.into(), "--local-session=-dev".into()])
+                .unwrap()
+                .1,
+            AvailabilityArgs::Sessions(vec!["-dev".into()])
+        );
     }
 }

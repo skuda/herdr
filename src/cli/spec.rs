@@ -960,18 +960,18 @@ fn env_option() -> Arg {
         .help("Set an environment variable for the launched process")
 }
 
-fn flag(name: &'static str) -> Arg {
+pub(super) fn flag(name: &'static str) -> Arg {
     Arg::new(name).long(name).action(ArgAction::SetTrue)
 }
 
-fn option(name: &'static str, value_name: &'static str) -> Arg {
+pub(super) fn option(name: &'static str, value_name: &'static str) -> Arg {
     Arg::new(name)
         .long(name)
         .value_name(value_name)
         .action(ArgAction::Set)
 }
 
-fn repeatable_option(name: &'static str, value_name: &'static str) -> Arg {
+pub(super) fn repeatable_option(name: &'static str, value_name: &'static str) -> Arg {
     option(name, value_name).action(ArgAction::Append)
 }
 
