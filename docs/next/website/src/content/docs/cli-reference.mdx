@@ -51,18 +51,27 @@ with the installed binary. Use `--json` for the full JSON Schema document, or
 
 ```bash
 herdr machine list
+herdr machine list --json
 herdr machine add workbox --label "Build machine"
 herdr machine rename <profile-id> --label "New name"
 herdr machine disable <profile-id>
 herdr machine enable <profile-id>
 herdr machine remove <profile-id>
+herdr machine availability <profile-id> --local-session default
+herdr machine availability <profile-id> --local-session default --local-session tradingdroid
+herdr machine availability <profile-id> --all-local-sessions
+herdr machine availability <profile-id> --no-local-sessions
 ```
 
-By default, `machine add` uses the remote default session. Add `--remote-session <name>` only for a named session. `machine list` accepts optional `--json` for scripts. See [Connecting machines](/docs/connecting-machines/) for the full setup and connection guide.
+By default, `machine add` uses the remote default session. Add `--remote-session <name>` only for a named session. `machine list` accepts optional `--json` for scripts. See [Connecting machines](/docs/connecting-machines/#local-session-availability) for local-session availability.
+
+`machine availability` takes one form: one or more `--local-session <name>` flags, `--all-local-sessions`, or `--no-local-sessions`. Repeat `--local-session` or use `--local-session=name`. Do not mix those forms. `--local-session` names use the same rules as local session names: ASCII letters, numbers, `.`, `_`, and `-`; 1 to 64 bytes; not `.` or `..`. A name does not have to exist yet. At most 64 names are accepted before sort and dedup. `--all-local-sessions` omits the restriction. `--no-local-sessions` stores an empty list.
 
 `machine add` checks the remote installation's capabilities, installs or updates with approval only when needed, and starts the requested session's background server before saving. Compatible release versions do not need to match. Run setup in an interactive terminal when installation or restart approval is required; failed or cancelled setup does not save a profile. Replacing a running server requires explicit approval with a default answer of No, and stops its pane processes. `machine add` never enables experimental handoff implicitly.
 
-Changes apply automatically to open local Herdr clients, normally within a second. Added or enabled machines connect in the background; renaming does not reconnect. Removing or disabling disconnects only that machine and leaves its remote sessions running. Removing the machine you are viewing returns to Local, or shows Local as unavailable until it reconnects. Each profile stores an opaque ID, label, SSH target, explicit remote session, and enabled state in client state. Herdr does not store passwords, private keys, or other SSH credentials.
+Changes apply automatically to open local Herdr clients, normally within a second. Added or enabled machines connect in the background when they are allowed in that client's local session; renaming does not reconnect. A locally allowed disabled row stays visible and does not connect. Removing or disabling disconnects only that machine and leaves its remote sessions running. Removing the machine you are viewing returns to Local, or shows Local as unavailable until it reconnects. Each profile stores an opaque ID, label, SSH target, explicit remote session, enabled state, and optional `local_sessions` list in client state. Herdr does not store passwords, private keys, or other SSH credentials.
+
+`machine list` reads the raw catalog. It does not hide restricted profiles. Text columns are id, label, target, session, enabled or disabled, availability (`all`, `none`, or the allowed local session names), available or unavailable, and selected or unselected. `--json` uses `id`, `label`, `target`, `session`, `enabled`, `local_sessions`, `available`, and `selected`. `available` and `selected` are for the current local session: `HERDR_SESSION` when set, otherwise `default`. That local session is not the saved remote session on the SSH host. In `machine list --json`, `local_sessions` is `null` when unrestricted, `[]` when allowed in no local session, and an array of names when restricted.
 
 Automatic connections and reconnects are non-interactive. If a host key, password, key passphrase, MFA step, install, update, or restart needs approval, the machine shows Attention instead of opening a hidden prompt. Run the standalone command printed by Herdr, such as `herdr --remote workbox`, to complete that setup in the foreground, then restart the client. Include `--session <name>` only when the profile targets a named session.
 
@@ -75,7 +84,7 @@ herdr --machine "Build machine" agent prompt w1:p1 "review this change"
 herdr --machine "Build machine" worktree create --cwd /srv/project --branch review
 ```
 
-The selector must match an enabled saved profile ID or a unique, case-sensitive label, not an arbitrary SSH hostname. The saved remote session is used; combining `--machine` with `--session` or `--remote` is an error. Without the prefix, commands retain their existing local session/socket behavior.
+The selector must match an enabled saved profile ID or a unique, case-sensitive label, not an arbitrary SSH hostname. After that raw match, the profile must also be available in the current local session. A disabled profile fails first with a usage error. An ineligible or invalid inherited `HERDR_SESSION` fails with usage error 2 before SSH. Combining `--machine` with `--session` or `--remote` is an error. The saved remote session is used. Without the prefix, commands retain their existing local session/socket behavior. Explicit `herdr --remote` is separate and still uses a raw enabled target and remote-session match.
 
 Supported commands are `workspace`, `worktree`, `tab`, `pane`, `notification`, `agent` (except `attach` and local `explain --file`), `api snapshot`, `status server`, and API-backed plugin commands (`link`, `unlink`, `enable`, `disable`, `list`, `action`, `log`, `pane`). Server commands support `stop`, `reload-config`, `agent-manifests`, and `reload-agent-manifests`. Local installation/configuration commands, plugin installation, session management, and interactive terminal attachment are not forwarded.
 
