@@ -445,8 +445,6 @@ pub fn validate_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
-// Temporary S1 staging: production callers land in S4/S5.
-#[cfg(test)]
 pub fn validated_local_session_name() -> Result<String, String> {
     match std::env::var_os(SESSION_ENV_VAR) {
         None => Ok(DEFAULT_SESSION_NAME.to_string()),

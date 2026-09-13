@@ -44,7 +44,7 @@ use clipboard_forwarding::forward_clipboard;
 #[cfg(test)]
 use config_reload::reload_local_client_config;
 use config_reload::{apply_reload, init_logging};
-use events::ClientLoopEvent;
+use events::{ActivationRequest, ClientLoopEvent, SelectionPersistence};
 use loop_config::ClientLoopConfig;
 use shell_runtime::*;
 use state::ClientState;
@@ -170,6 +170,17 @@ fn run_client_with_mode(
     let endpoint_keybindings = shell_config
         .as_ref()
         .is_some_and(shell::ClientShellConfig::uses_endpoint_keybindings);
+    let local_session = if client_rendered_shell && !is_remote_client_process() {
+        match crate::session::validated_local_session_name() {
+            Ok(name) => Some(name),
+            Err(error) => {
+                warn!(%error, "local session context is invalid; keeping Local-only startup");
+                None
+            }
+        }
+    } else {
+        None
+    };
     let loop_config = ClientLoopConfig {
         sound_config: loaded_config.config.ui.sound,
         mouse_scroll_lines,
@@ -182,13 +193,14 @@ fn run_client_with_mode(
         endpoint_keybindings,
         remote_image_paste_key,
         shell_config,
+        local_session: local_session.clone(),
     };
 
     crate::logging::startup("client");
     info!(path = %socket_path.display(), "{log_message}");
 
-    let endpoint_catalog = if client_rendered_shell && !is_remote_client_process() {
-        endpoint::EndpointCatalog::load().unwrap_or_else(|error| {
+    let endpoint_catalog = if let Some(local_session) = local_session.as_deref() {
+        endpoint::EndpointCatalog::load_for_local_session(local_session).unwrap_or_else(|error| {
             warn!(%error, "saved SSH endpoint catalog is unavailable");
             endpoint::EndpointCatalog::default()
         })
@@ -557,7 +569,12 @@ async fn run_client_loop(
     let mut pending_activation: Option<endpoint::PendingEndpointActivation> = None;
     let mut scheduled_activation = None;
     let mut pending_catalog: Option<Result<Vec<endpoint::SavedSshEndpoint>, String>> = None;
-    if state.shell.is_some() && !is_remote_client && state.attach_escape.is_none() {
+    if catalog_reload::should_watch_profiles(
+        state.shell.is_some(),
+        is_remote_client,
+        state.attach_escape.is_some(),
+        config.local_session.as_deref(),
+    ) {
         catalog_reload::watch_profiles(event_tx.clone(), should_quit.clone());
     }
 
@@ -623,11 +640,13 @@ async fn run_client_loop(
                                 .connection(&endpoint::ClientEndpointId::Local)
                                 .is_some()
                             {
-                                scheduled_activation = Some(ClientLoopEvent::ActivateEndpoint {
-                                    endpoint_id: endpoint::ClientEndpointId::Local,
-                                    target: None,
-                                    force: true,
-                                });
+                                scheduled_activation =
+                                    Some(ClientLoopEvent::ActivateEndpoint(ActivationRequest {
+                                        endpoint_id: endpoint::ClientEndpointId::Local,
+                                        target: None,
+                                        force: true,
+                                        persistence: SelectionPersistence::Preserve,
+                                    }));
                             } else {
                                 present_handoff_unavailable(
                                     &mut state,
@@ -1181,29 +1200,21 @@ async fn run_client_loop(
                     });
                 }
             },
-            ClientLoopEvent::ActivateEndpoint {
-                endpoint_id,
-                target,
-                force,
-            } => {
-                if !endpoint_catalog.select_endpoint(&endpoint_id) {
-                    continue;
-                }
-                if let Err(error) = endpoint_catalog.store_selection() {
-                    warn!(%error, "failed to persist desired endpoint selection");
-                }
-                begin_endpoint_activation(
+            ClientLoopEvent::ActivateEndpoint(request) => {
+                if !accept_endpoint_activation(
+                    &mut endpoint_catalog,
                     &mut state,
                     &mut write_stream,
                     &mut endpoint_commands,
                     &mut pending_activation,
                     &mut next_surface_serial,
-                    endpoint_id,
-                    target,
-                    force,
+                    request,
+                    config.local_session.as_deref(),
                     now,
                     &event_tx,
-                )?;
+                )? {
+                    continue;
+                }
             }
             ClientLoopEvent::ServerMessage {
                 endpoint_id,
@@ -1906,11 +1917,13 @@ async fn run_client_loop(
                             .connection(&selected_endpoint)
                             .is_some_and(|connection| !connection.surface_active);
                         if activation_ready && needs_surface && pending_activation.is_none() {
-                            scheduled_activation = Some(ClientLoopEvent::ActivateEndpoint {
-                                endpoint_id: selected_endpoint,
-                                target: None,
-                                force: false,
-                            });
+                            scheduled_activation =
+                                Some(ClientLoopEvent::ActivateEndpoint(ActivationRequest {
+                                    endpoint_id: selected_endpoint,
+                                    target: None,
+                                    force: false,
+                                    persistence: SelectionPersistence::Preserve,
+                                }));
                         }
                     }
                     ServerMessage::Welcome { .. } => {

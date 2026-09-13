@@ -1,5 +1,14 @@
 use super::*;
 
+pub(super) fn should_watch_profiles(
+    has_shell: bool,
+    is_remote_client: bool,
+    attach_escape: bool,
+    local_session: Option<&str>,
+) -> bool {
+    has_shell && !is_remote_client && !attach_escape && local_session.is_some()
+}
+
 pub(super) fn watch_profiles(
     event_tx: tokio::sync::mpsc::Sender<ClientLoopEvent>,
     should_quit: Arc<AtomicBool>,
@@ -272,5 +281,14 @@ mod tests {
                 ));
             }
         }
+    }
+
+    #[test]
+    fn should_watch_profiles_requires_valid_local_context() {
+        assert!(should_watch_profiles(true, false, false, Some("default")));
+        assert!(!should_watch_profiles(true, false, false, None));
+        assert!(!should_watch_profiles(true, true, false, Some("default")));
+        assert!(!should_watch_profiles(false, false, false, Some("default")));
+        assert!(!should_watch_profiles(true, false, true, Some("default")));
     }
 }
