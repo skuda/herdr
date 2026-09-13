@@ -130,6 +130,23 @@ impl EndpointSupervisors {
         retired
     }
 
+    #[cfg(test)]
+    pub(crate) fn contains_ssh(&self, id: &ClientEndpointId) -> bool {
+        self.endpoints.contains_key(id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ssh_generation(&self, id: &ClientEndpointId) -> Option<u64> {
+        self.endpoints.get(id).and_then(|state| state.generation)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_ssh_generation(&mut self, id: &ClientEndpointId, generation: u64) {
+        if let Some(state) = self.endpoints.get_mut(id) {
+            state.generation = Some(generation);
+        }
+    }
+
     pub(crate) fn spawn_due(
         &mut self,
         now: Instant,

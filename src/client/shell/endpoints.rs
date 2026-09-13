@@ -455,6 +455,81 @@ impl ClientShellState {
         self.apply_cached_endpoint_snapshot(endpoint_id);
     }
 
+    #[cfg(test)]
+    pub(crate) fn test_seed_pending_request(
+        &mut self,
+        request_id: impl Into<String>,
+        boot_id: impl Into<String>,
+    ) {
+        self.pending_requests.insert(
+            request_id.into(),
+            PendingEndpointRequest {
+                boot_id: boot_id.into(),
+                method_name: "workspace.list".into(),
+                confirmation_workspace_id: None,
+                kind: PendingEndpointKind::Generic,
+            },
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_has_pending_request(&self, request_id: &str) -> bool {
+        self.pending_requests.contains_key(request_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_seed_notification(
+        &mut self,
+        endpoint_id: ClientEndpointId,
+        title: impl Into<String>,
+    ) {
+        let notification = ClientVisibleNotification {
+            endpoint_id,
+            event: SemanticNotification {
+                kind: SemanticNotificationKind::Custom,
+                title: title.into(),
+                body: None,
+                sound: None,
+                agent: None,
+                workspace_id: None,
+                tab_id: None,
+                pane_id: None,
+                position: None,
+            },
+            deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+        };
+        if self.visible_notification.is_none() {
+            self.visible_notification = Some(notification);
+        } else {
+            self.queued_notifications.push_back(notification);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_has_notification_for(&self, endpoint_id: &ClientEndpointId) -> bool {
+        self.visible_notification
+            .as_ref()
+            .is_some_and(|notification| &notification.endpoint_id == endpoint_id)
+            || self
+                .queued_notifications
+                .iter()
+                .any(|notification| &notification.endpoint_id == endpoint_id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_composed_contains(&mut self, needle: &str) -> bool {
+        self.compose(100, 30)
+            .map(|frame| {
+                frame
+                    .cells
+                    .iter()
+                    .map(|cell| cell.symbol.as_str())
+                    .collect::<String>()
+                    .contains(needle)
+            })
+            .unwrap_or(false)
+    }
+
     pub(crate) fn set_endpoint_snapshot_for_generation(
         &mut self,
         endpoint_id: &ClientEndpointId,

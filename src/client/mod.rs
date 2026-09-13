@@ -170,11 +170,13 @@ fn run_client_with_mode(
     let endpoint_keybindings = shell_config
         .as_ref()
         .is_some_and(shell::ClientShellConfig::uses_endpoint_keybindings);
+    let mut local_session_error = None;
     let local_session = if client_rendered_shell && !is_remote_client_process() {
         match crate::session::validated_local_session_name() {
             Ok(name) => Some(name),
             Err(error) => {
                 warn!(%error, "local session context is invalid; keeping Local-only startup");
+                local_session_error = Some(error);
                 None
             }
         }
@@ -194,6 +196,7 @@ fn run_client_with_mode(
         remote_image_paste_key,
         shell_config,
         local_session: local_session.clone(),
+        local_session_error,
     };
 
     crate::logging::startup("client");
@@ -360,6 +363,12 @@ fn run_client_with_mode(
     Ok(())
 }
 
+fn apply_invalid_local_session_notice(shell: &mut shell::ClientShellState, error: Option<&str>) {
+    if let Some(error) = error {
+        shell.receive_endpoint_unavailable(error.to_owned());
+    }
+}
+
 /// The main client event loop.
 ///
 /// Uses a threaded architecture:
@@ -435,6 +444,7 @@ async fn run_client_loop(
                 endpoint::ClientEndpointStatus::Connecting,
             );
         }
+        apply_invalid_local_session_notice(shell, config.local_session_error.as_deref());
     }
     let host_mouse_capture_active = Arc::new(AtomicBool::new(state.mouse_capture_active));
     // Cell size reported by the host terminal, packed as width<<32 | height.
@@ -693,7 +703,7 @@ async fn run_client_loop(
             }
         }
         if let Some(shell) = state.shell.as_ref() {
-            if catalog_reload::should_spawn_due(pending_catalog.has_valid()) {
+            catalog_reload::spawn_due_if_ready(&pending_catalog, || {
                 supervisors.spawn_due(
                     std::time::Instant::now(),
                     endpoint::EndpointConnectOptions {
@@ -709,7 +719,7 @@ async fn run_client_loop(
                     },
                     &supervisor_tx,
                 );
-            }
+            });
         }
         let timer_delay = state
             .shell

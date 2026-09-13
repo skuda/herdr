@@ -1658,3 +1658,23 @@ fn locally_allowed_disabled_rows_remain_visible_without_connections() {
     state.set_endpoint_catalog(&catalog.profiles_for_local_session("default"));
     assert!(state.endpoint_status(&remote).is_none());
 }
+
+#[test]
+fn invalid_federation_context_uses_local_only_with_notice() {
+    let (mut state, remote) = state_with_remote();
+    let error = "session name cannot be empty";
+    crate::client::apply_invalid_local_session_notice(&mut state, Some(error));
+    state.set_endpoint_catalog(&[]);
+    assert!(state.endpoint_status(&remote).is_none());
+    assert!(state.endpoint_status(&ClientEndpointId::Local).is_some());
+    let frame = state.compose(100, 28).expect("local-only notice frame");
+    let text = frame
+        .cells
+        .iter()
+        .map(|cell| cell.symbol.as_str())
+        .collect::<String>();
+    assert!(
+        text.contains("Endpoint unavailable") || text.contains(error),
+        "{text}"
+    );
+}

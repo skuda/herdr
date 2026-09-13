@@ -1887,6 +1887,41 @@ mod tests {
         .unwrap();
         let absent = load_scoped(&catalog_path, &legacy, &default_scoped, "default");
         assert_eq!(absent.selected_profile, None);
+
+        std::fs::write(
+            &default_scoped,
+            format!(r#"{{"version":2,"selected_profile":"{id}"}}"#),
+        )
+        .unwrap();
+        let unsupported = load_scoped(&catalog_path, &legacy, &default_scoped, "default");
+        assert_eq!(unsupported.selected_profile, None);
+
+        let mut oversized = format!(r#"{{"version":1,"selected_profile":"{id}"}}"#).into_bytes();
+        oversized.resize((MAX_CATALOG_BYTES as usize) + 1, b' ');
+        std::fs::write(&default_scoped, oversized).unwrap();
+        let too_large = load_scoped(&catalog_path, &legacy, &default_scoped, "default");
+        assert_eq!(too_large.selected_profile, None);
+
+        std::fs::remove_file(&default_scoped).unwrap();
+        std::fs::create_dir(&default_scoped).unwrap();
+        let unreadable = load_scoped(&catalog_path, &legacy, &default_scoped, "default");
+        assert_eq!(unreadable.selected_profile, None);
+        std::fs::remove_dir(&default_scoped).unwrap();
+
+        std::fs::write(
+            &default_scoped,
+            format!(r#"{{"version":1,"selected_profile":"{id}"}}"#),
+        )
+        .unwrap();
+        catalog.ssh[0].enabled = false;
+        catalog.store_to_path(&catalog_path).unwrap();
+        let disabled = load_scoped(&catalog_path, &legacy, &default_scoped, "default");
+        assert_eq!(disabled.selected_profile, None);
+        catalog.ssh[0].enabled = true;
+        catalog.ssh[0].local_sessions = Some(vec!["tradingdroid".into()]);
+        catalog.store_to_path(&catalog_path).unwrap();
+        let disallowed = load_scoped(&catalog_path, &legacy, &default_scoped, "default");
+        assert_eq!(disallowed.selected_profile, None);
         std::fs::remove_dir_all(catalog_path.parent().unwrap()).unwrap();
     }
 
@@ -1996,5 +2031,15 @@ mod tests {
         ));
         assert!(!legacy.exists());
         std::fs::remove_dir_all(catalog_path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn standalone_remote_compatibility_ignores_local_availability() {
+        let mut catalog = EndpointCatalog::default();
+        let id = catalog.add_ssh("Build", "build", "agents").unwrap();
+        catalog.ssh[0].local_sessions = Some(vec!["default".into()]);
+        assert!(catalog.contains_enabled_target_session("build", "agents"));
+        catalog.set_enabled(&id, false);
+        assert!(!catalog.contains_enabled_target_session("build", "agents"));
     }
 }

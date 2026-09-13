@@ -1123,4 +1123,45 @@ mod tests {
         std::fs::remove_dir_all(&config_home).unwrap();
         std::env::remove_var("XDG_CONFIG_HOME");
     }
+
+    #[test]
+    fn session_name_reuse_retains_shared_preferences() {
+        let _guard = env_lock().lock().unwrap();
+        let root = std::env::temp_dir().join(format!("herdr-session-reuse-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::env::set_var("XDG_CONFIG_HOME", root.join("config"));
+        std::env::set_var("XDG_STATE_HOME", root.join("state"));
+        std::env::remove_var(SESSION_ENV_VAR);
+        clear_explicit_session_for_test();
+        let session_dir = data_dir_for(Some("tradingdroid"));
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let client = crate::config::state_dir().join("client");
+        std::fs::create_dir_all(client.join("endpoint-selections")).unwrap();
+        std::fs::write(
+            client.join("endpoints.json"),
+            r#"{"version":1,"ssh":[{"id":"0123456789abcdef0123456789abcdef","label":"Build","target":"build","session":"agents","enabled":true,"local_sessions":["tradingdroid"]}]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            client.join("endpoint-selections/tradingdroid.json"),
+            r#"{"version":1,"selected_profile":"0123456789abcdef0123456789abcdef"}"#,
+        )
+        .unwrap();
+        let catalog_before = std::fs::read(client.join("endpoints.json")).unwrap();
+        let scoped_before =
+            std::fs::read(client.join("endpoint-selections/tradingdroid.json")).unwrap();
+        delete_session("tradingdroid").unwrap();
+        assert!(!session_dir.exists());
+        assert_eq!(
+            std::fs::read(client.join("endpoints.json")).unwrap(),
+            catalog_before
+        );
+        assert_eq!(
+            std::fs::read(client.join("endpoint-selections/tradingdroid.json")).unwrap(),
+            scoped_before
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_STATE_HOME");
+    }
 }

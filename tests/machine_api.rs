@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -216,6 +216,39 @@ impl Drop for Harness {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+fn bounded_output(mut command: Command) -> Output {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().expect("spawn machine command");
+    let timeout = Duration::from_secs(5);
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let output = child.wait_with_output().unwrap_or_else(|error| {
+                    panic!("failed to collect timed-out machine command: {error}")
+                });
+                panic!(
+                    "machine command exceeded {timeout:?} without exiting; unexpected SSH/dispatch? stdout={} stderr={}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            Err(error) => panic!("failed to wait for machine command: {error}"),
+        }
+    }
+    child
+        .wait_with_output()
+        .expect("collect machine command output")
 }
 
 fn success(output: Output) -> Value {
@@ -462,11 +495,9 @@ fn machine_api_rejects_disallowed_and_invalid_context_without_ssh() {
         }]
     }));
 
-    let disallowed = harness
-        .command(&["--machine", "mac", "agent", "list"])
-        .env("HERDR_SESSION", "tradingdroid")
-        .output()
-        .unwrap();
+    let mut disallowed_cmd = harness.command(&["--machine", "mac", "agent", "list"]);
+    disallowed_cmd.env("HERDR_SESSION", "tradingdroid");
+    let disallowed = bounded_output(disallowed_cmd);
     assert_eq!(disallowed.status.code(), Some(2));
     let disallowed_err = String::from_utf8_lossy(&disallowed.stderr);
     assert!(
@@ -479,11 +510,9 @@ fn machine_api_rejects_disallowed_and_invalid_context_without_ssh() {
     );
     harness.assert_no_machine_connection();
 
-    let invalid = harness
-        .command(&["--machine", "mac", "agent", "list"])
-        .env("HERDR_SESSION", "bad/name")
-        .output()
-        .unwrap();
+    let mut invalid_cmd = harness.command(&["--machine", "mac", "agent", "list"]);
+    invalid_cmd.env("HERDR_SESSION", "bad/name");
+    let invalid = bounded_output(invalid_cmd);
     assert_eq!(invalid.status.code(), Some(2));
     let invalid_err = String::from_utf8_lossy(&invalid.stderr);
     assert!(invalid_err.contains("session name"), "{invalid_err}");
