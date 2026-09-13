@@ -1,7 +1,9 @@
 use std::collections::HashSet;
+use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{self, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -14,6 +16,8 @@ const MAX_PROFILES: usize = 64;
 const MAX_LABEL_BYTES: usize = 128;
 const MAX_TARGET_BYTES: usize = 1024;
 const MAX_LOCAL_SESSIONS: usize = 64;
+const CATALOG_LOCK_TIMEOUT: Duration = Duration::from_secs(2);
+const CATALOG_LOCK_RETRY_SLEEP: Duration = Duration::from_millis(25);
 static NEXT_TEMP_FILE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,6 +132,20 @@ struct EndpointSelection {
     selected_profile: Option<ProfileId>,
 }
 
+#[derive(Debug)]
+pub(crate) enum CatalogUpdateError {
+    Mutation(String),
+    Storage(String),
+}
+
+#[derive(Debug)]
+pub(crate) enum AddProfileError {
+    Load(String),
+    Invalid(String),
+    Prepare(io::Error),
+    Save(String),
+}
+
 impl Default for EndpointCatalog {
     fn default() -> Self {
         Self {
@@ -145,7 +163,82 @@ impl EndpointCatalog {
 
     pub(crate) fn load_profiles() -> Result<Vec<SavedSshEndpoint>, String> {
         // Live clients keep their own selection, independent of other attached clients.
-        Self::load_from_path(&catalog_path()).map(|catalog| catalog.ssh)
+        Self::load_raw().map(|catalog| catalog.ssh)
+    }
+
+    pub(crate) fn load_raw() -> Result<Self, String> {
+        Self::load_from_path(&catalog_path())
+    }
+
+    pub(crate) fn update_profiles<T>(
+        mutate: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, CatalogUpdateError> {
+        Self::update_profiles_at(
+            &catalog_path(),
+            &catalog_lock_path(),
+            CATALOG_LOCK_TIMEOUT,
+            mutate,
+        )
+    }
+
+    pub(crate) fn add_profile_after_prepare(
+        label: String,
+        target: String,
+        session: String,
+        prepare: impl FnOnce(&str, &str) -> io::Result<()>,
+    ) -> Result<ProfileId, AddProfileError> {
+        Self::add_profile_after_prepare_at(
+            &catalog_path(),
+            &catalog_lock_path(),
+            CATALOG_LOCK_TIMEOUT,
+            label,
+            target,
+            session,
+            prepare,
+        )
+    }
+
+    fn add_profile_after_prepare_at(
+        catalog_path: &Path,
+        lock_path: &Path,
+        timeout: Duration,
+        label: String,
+        target: String,
+        session: String,
+        prepare: impl FnOnce(&str, &str) -> io::Result<()>,
+    ) -> Result<ProfileId, AddProfileError> {
+        let catalog = Self::load_from_path(catalog_path).map_err(AddProfileError::Load)?;
+        catalog
+            .clone()
+            .add_ssh(label.clone(), &target, session.clone())
+            .map_err(AddProfileError::Invalid)?;
+        prepare(&target, &session).map_err(AddProfileError::Prepare)?;
+        Self::update_profiles_at(catalog_path, lock_path, timeout, |catalog| {
+            catalog.add_ssh(label, target, session)
+        })
+        .map_err(|error| match error {
+            CatalogUpdateError::Mutation(error) => AddProfileError::Invalid(error),
+            CatalogUpdateError::Storage(error) => AddProfileError::Save(error),
+        })
+    }
+
+    fn update_profiles_at<T>(
+        catalog_path: &Path,
+        lock_path: &Path,
+        timeout: Duration,
+        mutate: impl FnOnce(&mut Self) -> Result<T, String>,
+    ) -> Result<T, CatalogUpdateError> {
+        #[cfg(test)]
+        run_lock_acquisition_boundary_hook();
+        let _lock =
+            acquire_catalog_lock(lock_path, timeout).map_err(CatalogUpdateError::Storage)?;
+        let mut catalog =
+            Self::load_from_path(catalog_path).map_err(CatalogUpdateError::Storage)?;
+        let result = mutate(&mut catalog).map_err(CatalogUpdateError::Mutation)?;
+        catalog
+            .store_to_path(catalog_path)
+            .map_err(CatalogUpdateError::Storage)?;
+        Ok(result)
     }
 
     fn load_from_paths(catalog_path: &Path, selection_path: &Path) -> Result<Self, String> {
@@ -182,10 +275,6 @@ impl EndpointCatalog {
             catalog.selected_profile = None;
         }
         Ok(catalog)
-    }
-
-    pub(crate) fn store_profiles(&self) -> Result<(), String> {
-        self.store_to_path(&catalog_path())
     }
 
     pub(crate) fn store_selection(&self) -> Result<(), String> {
@@ -457,10 +546,66 @@ pub(crate) fn catalog_path() -> PathBuf {
         .join("endpoints.json")
 }
 
+fn catalog_lock_path() -> PathBuf {
+    crate::config::state_dir()
+        .join("client")
+        .join(".endpoints.lock")
+}
+
 fn selection_path() -> PathBuf {
     crate::config::state_dir()
         .join("client")
         .join("endpoint-selection.json")
+}
+
+#[cfg(test)]
+thread_local! {
+    static LOCK_ACQUISITION_BOUNDARY_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn set_lock_acquisition_boundary_hook(hook: impl FnOnce() + 'static) {
+    LOCK_ACQUISITION_BOUNDARY_HOOK.with(|cell| {
+        *cell.borrow_mut() = Some(Box::new(hook));
+    });
+}
+
+#[cfg(test)]
+fn run_lock_acquisition_boundary_hook() {
+    if let Some(hook) = LOCK_ACQUISITION_BOUNDARY_HOOK.with(|cell| cell.borrow_mut().take()) {
+        hook();
+    }
+}
+
+fn acquire_catalog_lock(lock_path: &Path, timeout: Duration) -> Result<File, String> {
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create endpoint catalog directory: {error}"))?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(lock_path)
+        .map_err(|error| format!("failed to open endpoint catalog lock: {error}"))?;
+    let deadline = Instant::now() + timeout;
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(TryLockError::WouldBlock) => {
+                if Instant::now() >= deadline {
+                    return Err("endpoint catalog is busy; try again".into());
+                }
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                std::thread::sleep(remaining.min(CATALOG_LOCK_RETRY_SLEEP));
+            }
+            Err(TryLockError::Error(error)) => {
+                return Err(format!("failed to lock endpoint catalog: {error}"));
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1075,5 +1220,420 @@ mod tests {
         assert_eq!(normalized.ssh.len(), 1);
         assert_eq!(normalized.selected_profile, None);
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    fn lock_path_for(catalog_path: &Path) -> PathBuf {
+        catalog_path.with_file_name(".endpoints.lock")
+    }
+
+    fn update_at<T>(
+        catalog_path: &Path,
+        mutate: impl FnOnce(&mut EndpointCatalog) -> Result<T, String>,
+    ) -> Result<T, CatalogUpdateError> {
+        EndpointCatalog::update_profiles_at(
+            catalog_path,
+            &lock_path_for(catalog_path),
+            CATALOG_LOCK_TIMEOUT,
+            mutate,
+        )
+    }
+
+    #[test]
+    fn catalog_mutations_never_copy_scoped_selection() {
+        let catalog_path = path("raw-admin-selection");
+        let parent = catalog_path.parent().unwrap();
+        let _ = std::fs::remove_dir_all(parent);
+        std::fs::create_dir_all(parent.join("endpoint-selections")).unwrap();
+        let legacy_selection = parent.join("endpoint-selection.json");
+        let scoped_selection = parent.join("endpoint-selections").join("default.json");
+        let mut catalog = EndpointCatalog::default();
+        let first = catalog.add_ssh("One", "one", "default").unwrap();
+        let second = catalog.add_ssh("Two", "two", "default").unwrap();
+        catalog.selected_profile = Some(first.clone());
+        catalog.store_to_path(&catalog_path).unwrap();
+        std::fs::write(
+            &legacy_selection,
+            b"{\"version\":1,\"selected_profile\":null}",
+        )
+        .unwrap();
+        std::fs::write(
+            &scoped_selection,
+            b"{\"version\":1,\"selected_profile\":null}",
+        )
+        .unwrap();
+        let legacy_before = std::fs::read(&legacy_selection).unwrap();
+        let scoped_before = std::fs::read(&scoped_selection).unwrap();
+
+        update_at(&catalog_path, |catalog| {
+            catalog.rename_ssh(&first, "Renamed").map(|_| ())
+        })
+        .unwrap();
+        update_at(&catalog_path, |catalog| {
+            catalog.ssh[1].local_sessions = Some(vec!["default".into()]);
+            Ok(())
+        })
+        .unwrap();
+        update_at(&catalog_path, |catalog| {
+            catalog.set_enabled(&second, false);
+            Ok(())
+        })
+        .unwrap();
+        update_at(&catalog_path, |catalog| {
+            catalog.set_enabled(&second, true);
+            Ok(())
+        })
+        .unwrap();
+        update_at(&catalog_path, |catalog| {
+            catalog.add_ssh("Three", "three", "default").map(|_| ())
+        })
+        .unwrap();
+        update_at(&catalog_path, |catalog| {
+            assert!(catalog.remove_ssh(&second));
+            Ok(())
+        })
+        .unwrap();
+
+        let loaded = EndpointCatalog::load_from_path(&catalog_path).unwrap();
+        assert_eq!(loaded.selected_profile.as_ref(), Some(&first));
+        assert_eq!(loaded.ssh[0].label, "Renamed");
+        assert_eq!(std::fs::read(&legacy_selection).unwrap(), legacy_before);
+        assert_eq!(std::fs::read(&scoped_selection).unwrap(), scoped_before);
+        std::fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn catalog_writes_normalize_only_globally_invalid_embedded_selection() {
+        let catalog_path = path("raw-write-normalize");
+        let parent = catalog_path.parent().unwrap();
+        let _ = std::fs::remove_dir_all(parent);
+        let present = SavedSshEndpoint {
+            id: ProfileId::parse("0123456789abcdef0123456789abcdef").unwrap(),
+            label: "Build".into(),
+            target: "build".into(),
+            session: "default".into(),
+            enabled: true,
+            local_sessions: Some(vec!["default".into()]),
+        };
+        let catalog = EndpointCatalog {
+            selected_profile: Some(present.id.clone()),
+            ssh: vec![present.clone()],
+            ..EndpointCatalog::default()
+        };
+        catalog.store_to_path(&catalog_path).unwrap();
+        let before = std::fs::read(&catalog_path).unwrap();
+        let _ = EndpointCatalog::load_from_path(&catalog_path).unwrap();
+        assert_eq!(std::fs::read(&catalog_path).unwrap(), before);
+
+        update_at(&catalog_path, |_| Ok(())).unwrap();
+        let kept = EndpointCatalog::load_from_path(&catalog_path).unwrap();
+        assert_eq!(kept.selected_profile.as_ref(), Some(&present.id));
+
+        write_catalog(
+            &catalog_path,
+            r#"{
+              "version": 1,
+              "selected_profile": "fedcba9876543210fedcba9876543210",
+              "ssh": [{
+                "id": "0123456789abcdef0123456789abcdef",
+                "label": "Build",
+                "target": "build",
+                "session": "default",
+                "enabled": true,
+                "local_sessions": ["default"]
+              }]
+            }"#,
+        );
+        update_at(&catalog_path, |_| Ok(())).unwrap();
+        let cleared_absent = EndpointCatalog::load_from_path(&catalog_path).unwrap();
+        assert_eq!(cleared_absent.selected_profile, None);
+        assert_eq!(cleared_absent.ssh.len(), 1);
+
+        write_catalog(
+            &catalog_path,
+            r#"{
+              "version": 1,
+              "selected_profile": "0123456789abcdef0123456789abcdef",
+              "ssh": [{
+                "id": "0123456789abcdef0123456789abcdef",
+                "label": "Build",
+                "target": "build",
+                "session": "default",
+                "enabled": false
+              }]
+            }"#,
+        );
+        update_at(&catalog_path, |_| Ok(())).unwrap();
+        let cleared_disabled = EndpointCatalog::load_from_path(&catalog_path).unwrap();
+        assert_eq!(cleared_disabled.selected_profile, None);
+
+        write_catalog(
+            &catalog_path,
+            r#"{
+              "version": 1,
+              "selected_profile": "not-a-profile-id",
+              "ssh": [{
+                "id": "0123456789abcdef0123456789abcdef",
+                "label": "Build",
+                "target": "build",
+                "session": "default",
+                "enabled": true
+              }]
+            }"#,
+        );
+        update_at(&catalog_path, |_| Ok(())).unwrap();
+        let cleared_malformed = EndpointCatalog::load_from_path(&catalog_path).unwrap();
+        assert_eq!(cleared_malformed.selected_profile, None);
+        assert_eq!(cleared_malformed.ssh.len(), 1);
+
+        let unchanged = std::fs::read(&catalog_path).unwrap();
+        let failed: Result<(), CatalogUpdateError> =
+            update_at(&catalog_path, |_| Err("mutation failed".into()));
+        assert!(matches!(failed, Err(CatalogUpdateError::Mutation(_))));
+        assert_eq!(std::fs::read(&catalog_path).unwrap(), unchanged);
+        std::fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn clearing_restrictions_restores_old_reader_valid_catalog() {
+        let catalog_path = path("clear-restrictions");
+        let parent = catalog_path.parent().unwrap();
+        let _ = std::fs::remove_dir_all(parent);
+        let first = SavedSshEndpoint {
+            id: ProfileId::parse("0123456789abcdef0123456789abcdef").unwrap(),
+            label: "One".into(),
+            target: "one".into(),
+            session: "default".into(),
+            enabled: true,
+            local_sessions: Some(vec!["default".into()]),
+        };
+        let second = SavedSshEndpoint {
+            id: ProfileId::parse("fedcba9876543210fedcba9876543210").unwrap(),
+            label: "Two".into(),
+            target: "two".into(),
+            session: "default".into(),
+            enabled: false,
+            local_sessions: Some(Vec::new()),
+        };
+        write_catalog(
+            &catalog_path,
+            &format!(
+                r#"{{
+                  "version": 1,
+                  "selected_profile": "{}",
+                  "ssh": [{{
+                    "id": "{}",
+                    "label": "One",
+                    "target": "one",
+                    "session": "default",
+                    "enabled": true,
+                    "local_sessions": ["default"]
+                  }}, {{
+                    "id": "{}",
+                    "label": "Two",
+                    "target": "two",
+                    "session": "default",
+                    "enabled": false,
+                    "local_sessions": []
+                  }}]
+                }}"#,
+                second.id, first.id, second.id
+            ),
+        );
+
+        update_at(&catalog_path, |catalog| {
+            assert!(catalog.remove_ssh(&second.id));
+            catalog.ssh[0].local_sessions = None;
+            Ok(())
+        })
+        .unwrap();
+
+        let encoded = std::fs::read_to_string(&catalog_path).unwrap();
+        assert!(!encoded.contains("local_sessions"));
+        let loaded = EndpointCatalog::load_from_path(&catalog_path).unwrap();
+        assert_eq!(loaded.selected_profile, None);
+        loaded.validate().unwrap();
+        serde_json::from_str::<LegacyEndpointCatalog>(&encoded).unwrap();
+        std::fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn catalog_rmw_preserves_concurrent_mutations() {
+        let catalog_path = path("rmw-concurrent");
+        let parent = catalog_path.parent().unwrap();
+        let _ = std::fs::remove_dir_all(parent);
+        let mut catalog = EndpointCatalog::default();
+        let first = catalog.add_ssh("One", "one", "default").unwrap();
+        let second = catalog.add_ssh("Two", "two", "default").unwrap();
+        catalog.store_to_path(&catalog_path).unwrap();
+        let (holding_tx, holding_rx) = std::sync::mpsc::channel();
+        let (at_boundary_tx, at_boundary_rx) = std::sync::mpsc::channel();
+        let (released_tx, released_rx) = std::sync::mpsc::channel();
+        let wait = Duration::from_secs(2);
+        let incumbent_path = catalog_path.clone();
+        let first_id = first.clone();
+        let incumbent = std::thread::spawn(move || {
+            let result = update_at(&incumbent_path, |catalog| {
+                holding_tx.send(()).unwrap();
+                at_boundary_rx.recv_timeout(wait).unwrap();
+                catalog.rename_ssh(&first_id, "Renamed").map(|_| ())
+            });
+            released_tx.send(()).unwrap();
+            result
+        });
+        holding_rx.recv_timeout(wait).unwrap();
+        let second_path = catalog_path.clone();
+        let second_id = second.clone();
+        let waiter = std::thread::spawn(move || {
+            set_lock_acquisition_boundary_hook(move || {
+                at_boundary_tx.send(()).unwrap();
+                released_rx.recv_timeout(wait).unwrap();
+            });
+            update_at(&second_path, |catalog| {
+                catalog.set_enabled(&second_id, false);
+                Ok(())
+            })
+        });
+        incumbent.join().unwrap().unwrap();
+        waiter.join().unwrap().unwrap();
+        let loaded = EndpointCatalog::load_from_path(&catalog_path).unwrap();
+        assert_eq!(loaded.ssh[0].label, "Renamed");
+        assert!(!loaded.ssh[1].enabled);
+        std::fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn catalog_lock_timeout_leaves_catalog_unchanged() {
+        let catalog_path = path("lock-timeout");
+        let parent = catalog_path.parent().unwrap();
+        let _ = std::fs::remove_dir_all(parent);
+        let mut catalog = EndpointCatalog::default();
+        catalog.add_ssh("One", "one", "default").unwrap();
+        catalog.store_to_path(&catalog_path).unwrap();
+        let before = std::fs::read(&catalog_path).unwrap();
+        let lock_path = lock_path_for(&catalog_path);
+        let held = acquire_catalog_lock(&lock_path, CATALOG_LOCK_TIMEOUT).unwrap();
+        let error = EndpointCatalog::update_profiles_at(
+            &catalog_path,
+            &lock_path,
+            Duration::from_millis(40),
+            |catalog| {
+                catalog.ssh[0].label = "Changed".into();
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(error, CatalogUpdateError::Storage(message) if message.contains("busy")));
+        assert_eq!(std::fs::read(&catalog_path).unwrap(), before);
+        drop(held);
+        update_at(&catalog_path, |catalog| {
+            catalog.ssh[0].label = "Changed".into();
+            Ok(())
+        })
+        .unwrap();
+        let loaded = EndpointCatalog::load_from_path(&catalog_path).unwrap();
+        assert_eq!(loaded.ssh[0].label, "Changed");
+        std::fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn catalog_add_preparation_does_not_hold_lock() {
+        let catalog_path = path("add-prepare");
+        let parent = catalog_path.parent().unwrap();
+        let _ = std::fs::remove_dir_all(parent);
+        let mut catalog = EndpointCatalog::default();
+        let existing = catalog.add_ssh("One", "one", "default").unwrap();
+        catalog.store_to_path(&catalog_path).unwrap();
+        let lock_path = lock_path_for(&catalog_path);
+        let wait = Duration::from_secs(2);
+        let (preparing_tx, preparing_rx) = std::sync::mpsc::channel();
+        let (continue_tx, continue_rx) = std::sync::mpsc::channel();
+        let add_path = catalog_path.clone();
+        let add_lock = lock_path.clone();
+        let adder = std::thread::spawn(move || {
+            EndpointCatalog::add_profile_after_prepare_at(
+                &add_path,
+                &add_lock,
+                CATALOG_LOCK_TIMEOUT,
+                "Two".into(),
+                "two".into(),
+                "default".into(),
+                |_, _| {
+                    preparing_tx.send(()).unwrap();
+                    continue_rx.recv_timeout(wait).unwrap();
+                    Ok(())
+                },
+            )
+        });
+        preparing_rx.recv_timeout(wait).unwrap();
+        update_at(&catalog_path, |catalog| {
+            catalog.rename_ssh(&existing, "Renamed").map(|_| ())
+        })
+        .unwrap();
+        continue_tx.send(()).unwrap();
+        adder.join().unwrap().unwrap();
+
+        let loaded = EndpointCatalog::load_from_path(&catalog_path).unwrap();
+        assert_eq!(loaded.ssh.len(), 2);
+        assert_eq!(loaded.ssh[0].label, "Renamed");
+        assert_eq!(loaded.ssh[1].label, "Two");
+
+        update_at(&catalog_path, |catalog| {
+            while catalog.ssh.len() < MAX_PROFILES - 1 {
+                catalog.add_ssh(
+                    format!("Fill{}", catalog.ssh.len()),
+                    format!("fill{}", catalog.ssh.len()),
+                    "default",
+                )?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            EndpointCatalog::load_from_path(&catalog_path)
+                .unwrap()
+                .ssh
+                .len(),
+            MAX_PROFILES - 1
+        );
+
+        let (full_prep_tx, full_prep_rx) = std::sync::mpsc::channel();
+        let (full_go_tx, full_go_rx) = std::sync::mpsc::channel();
+        let overflow_path = catalog_path.clone();
+        let overflow_lock = lock_path;
+        let overflow = std::thread::spawn(move || {
+            EndpointCatalog::add_profile_after_prepare_at(
+                &overflow_path,
+                &overflow_lock,
+                CATALOG_LOCK_TIMEOUT,
+                "Overflow".into(),
+                "overflow".into(),
+                "default".into(),
+                |_, _| {
+                    full_prep_tx.send(()).unwrap();
+                    full_go_rx.recv_timeout(wait).unwrap();
+                    Ok(())
+                },
+            )
+        });
+        full_prep_rx.recv_timeout(wait).unwrap();
+        update_at(&catalog_path, |catalog| {
+            catalog.add_ssh("Last", "last", "default").map(|_| ())
+        })
+        .unwrap();
+        let after_last = std::fs::read(&catalog_path).unwrap();
+        assert_eq!(
+            EndpointCatalog::load_from_path(&catalog_path)
+                .unwrap()
+                .ssh
+                .len(),
+            MAX_PROFILES
+        );
+        full_go_tx.send(()).unwrap();
+        assert!(matches!(
+            overflow.join().unwrap(),
+            Err(AddProfileError::Invalid(_))
+        ));
+        assert_eq!(std::fs::read(&catalog_path).unwrap(), after_last);
+        std::fs::remove_dir_all(parent).unwrap();
     }
 }

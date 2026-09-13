@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-use crate::client::endpoint::{EndpointCatalog, ProfileId};
+use crate::client::endpoint::{AddProfileError, CatalogUpdateError, EndpointCatalog, ProfileId};
 
 const HELP: &str = "Usage:
   herdr machine list [--json]
@@ -55,7 +55,7 @@ fn list(args: &[String]) -> std::io::Result<i32> {
             return Ok(2);
         }
     };
-    let catalog = load_catalog()?;
+    let catalog = load_raw_catalog()?;
     let rows = catalog
         .ssh
         .iter()
@@ -156,37 +156,29 @@ fn add(args: &[String]) -> std::io::Result<i32> {
             return Ok(2);
         }
     };
-    let mut catalog = load_catalog()?;
-    match catalog.add_ssh(label.clone(), &target, session.clone()) {
-        Ok(_) => {}
-        Err(error) => {
+    let id = match EndpointCatalog::add_profile_after_prepare(
+        label,
+        target.clone(),
+        session,
+        crate::remote::prepare_saved_ssh,
+    ) {
+        Ok(id) => id,
+        Err(AddProfileError::Invalid(error)) => {
             eprintln!("error: {error}");
             return Ok(2);
         }
-    }
-    if let Err(error) = crate::remote::prepare_saved_ssh(&target, &session) {
-        eprintln!("error: {error}; machine was not saved");
-        crate::remote::print_saved_ssh_error_hint(&error, &target);
-        return Ok(1);
-    }
-    // Setup can wait for human approval. Do not overwrite catalog edits made meanwhile.
-    let mut catalog = load_catalog().map_err(|error| {
-        std::io::Error::other(format!(
-            "remote prepared, but machine was not saved: {error}"
-        ))
-    })?;
-    let id = match catalog.add_ssh(label, target, session) {
-        Ok(id) => id,
-        Err(error) => {
-            eprintln!("error: {error}");
-            return Ok(2);
+        Err(AddProfileError::Prepare(error)) => {
+            eprintln!("error: {error}; machine was not saved");
+            crate::remote::print_saved_ssh_error_hint(&error, &target);
+            return Ok(1);
+        }
+        Err(AddProfileError::Load(error)) => return Err(std::io::Error::other(error)),
+        Err(AddProfileError::Save(error)) => {
+            return Err(std::io::Error::other(format!(
+                "remote prepared, but machine was not saved: {error}"
+            )));
         }
     };
-    store_catalog(&catalog).map_err(|error| {
-        std::io::Error::other(format!(
-            "remote prepared, but machine was not saved: {error}"
-        ))
-    })?;
     println!("Saved SSH machine {id}. Remote server is ready.");
     println!("Open Herdr clients connect automatically.");
     Ok(0)
@@ -209,19 +201,14 @@ fn rename(args: &[String]) -> std::io::Result<i32> {
             return Ok(2);
         }
     };
-    let mut catalog = load_catalog()?;
-    match catalog.rename_ssh(&id, label) {
-        Ok(true) => {}
-        Ok(false) => {
-            eprintln!("machine profile {id} was not found");
-            return Ok(1);
-        }
-        Err(error) => {
-            eprintln!("error: {error}");
-            return Ok(2);
-        }
+    match EndpointCatalog::update_profiles(|catalog| match catalog.rename_ssh(&id, label) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(format!("machine profile {id} was not found")),
+        Err(error) => Err(error),
+    }) {
+        Ok(()) => {}
+        Err(error) => return map_update_error(error),
     }
-    store_catalog(&catalog)?;
     println!("Renamed SSH machine {id}.");
     Ok(0)
 }
@@ -230,15 +217,15 @@ fn remove(args: &[String]) -> std::io::Result<i32> {
     let Some(id) = one_profile_id(args, "usage: herdr machine remove <profile-id>")? else {
         return Ok(2);
     };
-    let mut catalog = load_catalog()?;
-    let previous_selection = catalog.selected_profile.clone();
-    if !catalog.remove_ssh(&id) {
-        eprintln!("machine profile {id} was not found");
-        return Ok(1);
-    }
-    store_catalog(&catalog)?;
-    if catalog.selected_profile != previous_selection {
-        catalog.store_selection().map_err(std::io::Error::other)?;
+    match EndpointCatalog::update_profiles(|catalog| {
+        if catalog.remove_ssh(&id) {
+            Ok(())
+        } else {
+            Err(format!("machine profile {id} was not found"))
+        }
+    }) {
+        Ok(()) => {}
+        Err(error) => return map_update_error(error),
     }
     println!("Removed SSH machine {id}.");
     Ok(0)
@@ -250,15 +237,15 @@ fn set_enabled(args: &[String], enabled: bool) -> std::io::Result<i32> {
     let Some(id) = one_profile_id(args, &usage)? else {
         return Ok(2);
     };
-    let mut catalog = load_catalog()?;
-    let previous_selection = catalog.selected_profile.clone();
-    if !catalog.set_enabled(&id, enabled) {
-        eprintln!("machine profile {id} was not found");
-        return Ok(1);
-    }
-    store_catalog(&catalog)?;
-    if catalog.selected_profile != previous_selection {
-        catalog.store_selection().map_err(std::io::Error::other)?;
+    match EndpointCatalog::update_profiles(|catalog| {
+        if catalog.set_enabled(&id, enabled) {
+            Ok(())
+        } else {
+            Err(format!("machine profile {id} was not found"))
+        }
+    }) {
+        Ok(()) => {}
+        Err(error) => return map_update_error(error),
     }
     println!(
         "{} SSH machine {id}.",
@@ -281,12 +268,22 @@ fn one_profile_id(args: &[String], usage: &str) -> std::io::Result<Option<Profil
     }
 }
 
-fn load_catalog() -> std::io::Result<EndpointCatalog> {
-    EndpointCatalog::load().map_err(std::io::Error::other)
+fn load_raw_catalog() -> std::io::Result<EndpointCatalog> {
+    EndpointCatalog::load_raw().map_err(std::io::Error::other)
 }
 
-fn store_catalog(catalog: &EndpointCatalog) -> std::io::Result<()> {
-    catalog.store_profiles().map_err(std::io::Error::other)
+fn map_update_error(error: CatalogUpdateError) -> std::io::Result<i32> {
+    match error {
+        CatalogUpdateError::Mutation(error) if error.contains("was not found") => {
+            eprintln!("{error}");
+            Ok(1)
+        }
+        CatalogUpdateError::Mutation(error) => {
+            eprintln!("error: {error}");
+            Ok(2)
+        }
+        CatalogUpdateError::Storage(error) => Err(std::io::Error::other(error)),
+    }
 }
 
 #[cfg(test)]
