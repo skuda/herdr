@@ -966,7 +966,7 @@ mod tests {
         .unwrap());
         assert_eq!(std::fs::read(&selection_path).unwrap(), before);
 
-        let absent_path = parent.join("tradingdroid.json");
+        let absent_path = parent.join("sandbox.json");
         assert!(!absent_path.exists());
         pending = Some(endpoint::PendingEndpointActivation::test_ready_successor(
             ClientEndpointId::Local,
@@ -988,7 +988,7 @@ mod tests {
             &mut pending,
             &mut serial,
             request,
-            Some("tradingdroid"),
+            Some("sandbox"),
             Some(&absent_path),
             Instant::now(),
             &tx,

@@ -73,11 +73,11 @@ herdr machine remove <profile-id>
 
 可用性是本地配置，不是安全边界。它限制哪些本地 Herdr 会话可以使用已保存的 SSH 机器，不会改变 SSH 主机上的远程会话。
 
-本地会话在设置了 `HERDR_SESSION` 时用该值，否则为 `default`。`tradingdroid` 这类命名会话是本地的。保存的 `session` 字段是 SSH 主机上的远程 Herdr 会话。
+本地会话在设置了 `HERDR_SESSION` 时用该值，否则为 `default`。`sandbox` 这类命名会话是本地的。保存的 `session` 字段是 SSH 主机上的远程 Herdr 会话。
 
 ```bash
 herdr machine availability <profile-id> --local-session default
-herdr machine availability <profile-id> --local-session default --local-session tradingdroid
+herdr machine availability <profile-id> --local-session default --local-session sandbox
 herdr machine availability <profile-id> --all-local-sessions
 herdr machine availability <profile-id> --no-local-sessions
 ```
@@ -90,7 +90,7 @@ herdr machine availability <profile-id> --no-local-sessions
 
 无效的继承本地会话加上 socket 覆盖时，只启动 Local。不会加载已保存机器，不会启动目录监视，也不会写入作用域选择文件。现有通知面会显示验证错误。普通 socket API 命令的覆盖行为不变。
 
-每个本地会话把所选机器存在 `endpoint-selections/session-<会话名字节的小写十六进制>.json`。例如：`default` 为 `session-64656661756c74.json`；`Default` 为 `session-44656661756c74.json`；`tradingdroid` 为 `session-74726164696e6764726f6964.json`。仅精确小写名称 `default` 在缺少作用域文件时可能读取较旧的 `endpoint-selection.json`。命名会话（包括 `Default`）不会导入该旧文件，也不会使用目录中的嵌入选择。在 UI 中选择机器会写入作用域文件。自动回退、恢复和重连会保留磁盘上的上次显式选择，重新允许时不会抢走焦点。删除命名本地会话不会移除这些共享客户端文件；用同一名称重建会复用它们。
+每个本地会话把所选机器存在 `endpoint-selections/session-<会话名字节的小写十六进制>.json`。例如：`default` 为 `session-64656661756c74.json`；`Default` 为 `session-44656661756c74.json`；`sandbox` 为 `session-73616e64626f78.json`。仅精确小写名称 `default` 在缺少作用域文件时可能读取较旧的 `endpoint-selection.json`。命名会话（包括 `Default`）不会导入该旧文件，也不会使用目录中的嵌入选择。在 UI 中选择机器会写入作用域文件。自动回退、恢复和重连会保留磁盘上的上次显式选择，重新允许时不会抢走焦点。删除命名本地会话不会移除这些共享客户端文件；用同一名称重建会复用它们。
 
 写入共享目录时，无限制会省略 `local_sessions`。较旧的严格读取方会拒绝包含该字段的目录，包括空列表。降级前请对受限制配置运行 `--all-local-sessions`。写入还会清除全局无效的嵌入所选配置；读取不会改写文件。
 

@@ -506,12 +506,12 @@ fn machine_api_rejects_disallowed_and_invalid_context_without_ssh() {
     }));
 
     let mut disallowed_cmd = harness.command(&["--machine", "mac", "agent", "list"]);
-    disallowed_cmd.env("HERDR_SESSION", "tradingdroid");
+    disallowed_cmd.env("HERDR_SESSION", "sandbox");
     let disallowed = bounded_output(disallowed_cmd);
     assert_eq!(disallowed.status.code(), Some(2));
     let disallowed_err = String::from_utf8_lossy(&disallowed.stderr);
     assert!(
-        disallowed_err.contains("not available in local session tradingdroid"),
+        disallowed_err.contains("not available in local session sandbox"),
         "{disallowed_err}"
     );
     assert!(
@@ -567,7 +567,7 @@ fn machine_api_disabled_and_ambiguous_errors_precede_availability() {
     }));
     let disabled = harness
         .command(&["--machine", PROFILE_ID, "agent", "list"])
-        .env("HERDR_SESSION", "tradingdroid")
+        .env("HERDR_SESSION", "sandbox")
         .output()
         .unwrap();
     assert_eq!(disabled.status.code(), Some(2));
@@ -577,7 +577,7 @@ fn machine_api_disabled_and_ambiguous_errors_precede_availability() {
 
     let ambiguous = harness
         .command(&["--machine", "mac", "agent", "list"])
-        .env("HERDR_SESSION", "tradingdroid")
+        .env("HERDR_SESSION", "sandbox")
         .output()
         .unwrap();
     assert_eq!(ambiguous.status.code(), Some(2));
@@ -602,7 +602,7 @@ fn machine_list_json_uses_raw_profiles_and_scoped_preference() {
                 "target": "one",
                 "session": "fleet",
                 "enabled": true,
-                "local_sessions": ["default", "tradingdroid"]
+                "local_sessions": ["default", "sandbox"]
             },
             {
                 "id": disabled_id,
@@ -617,7 +617,7 @@ fn machine_list_json_uses_raw_profiles_and_scoped_preference() {
                 "target": "three",
                 "session": "fleet",
                 "enabled": true,
-                "local_sessions": ["tradingdroid"]
+                "local_sessions": ["sandbox"]
             }
         ]
     }));
@@ -637,7 +637,7 @@ fn machine_list_json_uses_raw_profiles_and_scoped_preference() {
     assert!(!harness
         .catalog_path()
         .join("endpoint-selections")
-        .join(encoded_selection_file("tradingdroid"))
+        .join(encoded_selection_file("sandbox"))
         .exists());
 
     let default_list = success(
@@ -661,7 +661,7 @@ fn machine_list_json_uses_raw_profiles_and_scoped_preference() {
     let named_list = success(
         harness
             .command(&["machine", "list", "--json"])
-            .env("HERDR_SESSION", "tradingdroid")
+            .env("HERDR_SESSION", "sandbox")
             .output()
             .unwrap(),
     );
@@ -691,6 +691,6 @@ fn machine_list_json_uses_raw_profiles_and_scoped_preference() {
     assert!(!harness
         .catalog_path()
         .join("endpoint-selections")
-        .join(encoded_selection_file("tradingdroid"))
+        .join(encoded_selection_file("sandbox"))
         .exists());
 }

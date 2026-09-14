@@ -795,10 +795,10 @@ mod tests {
             titled.file_name().and_then(|name| name.to_str()),
             Some("session-44656661756c74.json")
         );
-        let named = scoped_selection_path("tradingdroid").unwrap();
+        let named = scoped_selection_path("sandbox").unwrap();
         assert_eq!(
             named.file_name().and_then(|name| name.to_str()),
-            Some("session-74726164696e6764726f6964.json")
+            Some("session-73616e64626f78.json")
         );
         assert_ne!(default.file_name(), titled.file_name());
         let folded: Vec<_> = ["default", "Default", "DEFAULT", "DeFaUlT"]
@@ -1076,14 +1076,7 @@ mod tests {
     fn local_availability_matrix() {
         let cases = [
             ("omitted-enabled-default", true, None, "default", true, true),
-            (
-                "omitted-enabled-tradingdroid",
-                true,
-                None,
-                "tradingdroid",
-                true,
-                true,
-            ),
+            ("omitted-enabled-sandbox", true, None, "sandbox", true, true),
             (
                 "omitted-disabled-default",
                 false,
@@ -1093,10 +1086,10 @@ mod tests {
                 false,
             ),
             (
-                "omitted-disabled-tradingdroid",
+                "omitted-disabled-sandbox",
                 false,
                 None,
-                "tradingdroid",
+                "sandbox",
                 true,
                 false,
             ),
@@ -1109,10 +1102,10 @@ mod tests {
                 false,
             ),
             (
-                "empty-enabled-tradingdroid",
+                "empty-enabled-sandbox",
                 true,
                 Some(vec![]),
-                "tradingdroid",
+                "sandbox",
                 false,
                 false,
             ),
@@ -1133,10 +1126,10 @@ mod tests {
                 true,
             ),
             (
-                "default-only-enabled-tradingdroid",
+                "default-only-enabled-sandbox",
                 true,
                 Some(vec!["default"]),
-                "tradingdroid",
+                "sandbox",
                 false,
                 false,
             ),
@@ -1149,49 +1142,49 @@ mod tests {
                 false,
             ),
             (
-                "tradingdroid-only-enabled-default",
+                "sandbox-only-enabled-default",
                 true,
-                Some(vec!["tradingdroid"]),
+                Some(vec!["sandbox"]),
                 "default",
                 false,
                 false,
             ),
             (
-                "tradingdroid-only-enabled-tradingdroid",
+                "sandbox-only-enabled-sandbox",
                 true,
-                Some(vec!["tradingdroid"]),
-                "tradingdroid",
+                Some(vec!["sandbox"]),
+                "sandbox",
                 true,
                 true,
             ),
             (
-                "tradingdroid-only-disabled-tradingdroid",
+                "sandbox-only-disabled-sandbox",
                 false,
-                Some(vec!["tradingdroid"]),
-                "tradingdroid",
+                Some(vec!["sandbox"]),
+                "sandbox",
                 true,
                 false,
             ),
             (
                 "both-enabled-default",
                 true,
-                Some(vec!["default", "tradingdroid"]),
+                Some(vec!["default", "sandbox"]),
                 "default",
                 true,
                 true,
             ),
             (
-                "both-enabled-tradingdroid",
+                "both-enabled-sandbox",
                 true,
-                Some(vec!["default", "tradingdroid"]),
-                "tradingdroid",
+                Some(vec!["default", "sandbox"]),
+                "sandbox",
                 true,
                 true,
             ),
             (
                 "both-enabled-other",
                 true,
-                Some(vec!["default", "tradingdroid"]),
+                Some(vec!["default", "sandbox"]),
                 "other",
                 false,
                 false,
@@ -1199,7 +1192,7 @@ mod tests {
             (
                 "both-disabled-default",
                 false,
-                Some(vec!["default", "tradingdroid"]),
+                Some(vec!["default", "sandbox"]),
                 "default",
                 true,
                 false,
@@ -1252,12 +1245,12 @@ mod tests {
     #[test]
     fn local_sessions_normalize_and_enforce_input_bounds() {
         let sorted = normalize_local_sessions(Some(&[
-            "tradingdroid".into(),
+            "sandbox".into(),
             "default".into(),
             "default".into(),
         ]))
         .unwrap();
-        assert_eq!(sorted, Some(vec!["default".into(), "tradingdroid".into()]));
+        assert_eq!(sorted, Some(vec!["default".into(), "sandbox".into()]));
 
         let accepted: Vec<String> = (0..MAX_LOCAL_SESSIONS)
             .map(|index| format!("session-{index:02}"))
@@ -1456,19 +1449,16 @@ mod tests {
             resolve_selected_profile(&disallowed, "default", &missing_scoped, &missing_legacy)
                 .is_some()
         );
-        let named_scoped = path.with_file_name("tradingdroid.json");
+        let named_scoped = path.with_file_name("sandbox.json");
         std::fs::write(
             &named_scoped,
             format!(r#"{{"version":1,"selected_profile":"{profile_id}"}}"#),
         )
         .unwrap();
-        assert!(resolve_selected_profile(
-            &disallowed,
-            "tradingdroid",
-            &named_scoped,
-            &missing_legacy
-        )
-        .is_none());
+        assert!(
+            resolve_selected_profile(&disallowed, "sandbox", &named_scoped, &missing_legacy)
+                .is_none()
+        );
 
         disallowed.store_to_path(&path).unwrap();
         let reloaded = EndpointCatalog::load_from_path(&path).unwrap();
@@ -1906,12 +1896,7 @@ mod tests {
                 .join("endpoint-selections")
                 .join(format!("{session}.json"))
         };
-        (
-            catalog_path,
-            legacy,
-            scoped("default"),
-            scoped("tradingdroid"),
-        )
+        (catalog_path, legacy, scoped("default"), scoped("sandbox"))
     }
 
     fn load_scoped(
@@ -1941,7 +1926,7 @@ mod tests {
 
         let default = load_scoped(&catalog_path, &legacy, &default_scoped, "default");
         assert_eq!(default.selected_profile.as_ref(), Some(&id));
-        let named = load_scoped(&catalog_path, &legacy, &named_scoped, "tradingdroid");
+        let named = load_scoped(&catalog_path, &legacy, &named_scoped, "sandbox");
         assert_eq!(named.selected_profile, None);
         assert!(!default_scoped.exists());
         assert!(!named_scoped.exists());
@@ -2012,7 +1997,7 @@ mod tests {
         let disabled = load_scoped(&catalog_path, &legacy, &default_scoped, "default");
         assert_eq!(disabled.selected_profile, None);
         catalog.ssh[0].enabled = true;
-        catalog.ssh[0].local_sessions = Some(vec!["tradingdroid".into()]);
+        catalog.ssh[0].local_sessions = Some(vec!["sandbox".into()]);
         catalog.store_to_path(&catalog_path).unwrap();
         let disallowed = load_scoped(&catalog_path, &legacy, &default_scoped, "default");
         assert_eq!(disallowed.selected_profile, None);
@@ -2038,7 +2023,7 @@ mod tests {
         assert!(catalog.apply_activation_selection_to_path(
             &super::super::ClientEndpointId::Local,
             true,
-            Some("tradingdroid"),
+            Some("sandbox"),
             Some(&named_scoped),
         ));
 

@@ -709,13 +709,13 @@ mod tests {
         let mut allowed = endpoint::SavedSshEndpoint::new("Allowed", "one", "main").unwrap();
         allowed.local_sessions = Some(vec!["default".into()]);
         let mut disallowed = endpoint::SavedSshEndpoint::new("Hidden", "two", "main").unwrap();
-        disallowed.local_sessions = Some(vec!["tradingdroid".into()]);
+        disallowed.local_sessions = Some(vec!["sandbox".into()]);
         let mut disabled = endpoint::SavedSshEndpoint::new("Idle", "three", "main").unwrap();
         disabled.enabled = false;
         let mut catalog = EndpointCatalog::default();
         catalog.ssh = vec![allowed.clone(), disallowed.clone(), disabled.clone()];
         let default = catalog.profiles_for_local_session("default");
-        let named = catalog.profiles_for_local_session("tradingdroid");
+        let named = catalog.profiles_for_local_session("sandbox");
         let default_supervisors = EndpointSupervisors::new(&default, now);
         let named_supervisors = EndpointSupervisors::new(&named, now);
         assert!(default_supervisors.contains_ssh(&ClientEndpointId::Ssh(allowed.id.clone())));
@@ -744,7 +744,7 @@ mod tests {
         let mut supervisors = EndpointSupervisors::new(&[profile.clone()], now);
         supervisors.set_ssh_generation(&id, 4);
         profile.label = "Renamed".into();
-        profile.local_sessions = Some(vec!["default".into(), "tradingdroid".into()]);
+        profile.local_sessions = Some(vec!["default".into(), "sandbox".into()]);
         assert!(supervisors
             .reconcile_profiles(&[profile.clone()], now)
             .is_empty());
@@ -754,7 +754,7 @@ mod tests {
             supervisors.reconcile_profiles(&[profile.clone()], now),
             vec![id.clone()]
         );
-        profile.local_sessions = Some(vec!["tradingdroid".into()]);
+        profile.local_sessions = Some(vec!["sandbox".into()]);
         let mut filtered_catalog = EndpointCatalog::default();
         filtered_catalog.ssh = vec![profile];
         let filtered = filtered_catalog.profiles_for_local_session("default");

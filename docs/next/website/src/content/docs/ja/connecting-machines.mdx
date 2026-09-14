@@ -73,11 +73,11 @@ herdr machine remove <profile-id>
 
 利用可否はローカル設定であり、セキュリティ境界ではありません。どのローカル Herdr セッションが保存済み SSH マシンを使えるかを制限します。SSH ホスト上のリモートセッションは変えません。
 
-ローカルセッションは、`HERDR_SESSION` があればその値、なければ `default` です。`tradingdroid` のような名前付きセッションはローカルです。保存済みの `session` は SSH ホスト上のリモート Herdr セッションです。
+ローカルセッションは、`HERDR_SESSION` があればその値、なければ `default` です。`sandbox` のような名前付きセッションはローカルです。保存済みの `session` は SSH ホスト上のリモート Herdr セッションです。
 
 ```bash
 herdr machine availability <profile-id> --local-session default
-herdr machine availability <profile-id> --local-session default --local-session tradingdroid
+herdr machine availability <profile-id> --local-session default --local-session sandbox
 herdr machine availability <profile-id> --all-local-sessions
 herdr machine availability <profile-id> --no-local-sessions
 ```
@@ -90,7 +90,7 @@ herdr machine availability <profile-id> --no-local-sessions
 
 不正な継承ローカルセッションとソケット上書きがある場合、Local のみで起動します。保存済みマシンは読み込まれず、カタログ監視は始まらず、スコープ付き選択ファイルも書きません。既存の通知面に検証エラーを出します。通常のソケット API コマンドの上書き動作は変わりません。
 
-各ローカルセッションの選択は `endpoint-selections/session-<セッション名バイトの小文字16進数>.json` に保存します。例: `default` は `session-64656661756c74.json`、`Default` は `session-44656661756c74.json`、`tradingdroid` は `session-74726164696e6764726f6964.json`。完全一致の小文字 `default` だけ、スコープ付きファイルが無いときに古い `endpoint-selection.json` を読むことがあります。`Default` を含む名前付きセッションはその旧ファイルも埋め込み選択も取り込みません。UI でマシンを選ぶとスコープ付きファイルを書きます。自動フォールバック、復旧、再接続はディスク上の最後の明示的な選択を保ち、再許可してもフォーカスを奪いません。名前付きローカルセッションを削除しても、これらの共有クライアントファイルは残り、同じ名前を作り直すと再利用します。
+各ローカルセッションの選択は `endpoint-selections/session-<セッション名バイトの小文字16進数>.json` に保存します。例: `default` は `session-64656661756c74.json`、`Default` は `session-44656661756c74.json`、`sandbox` は `session-73616e64626f78.json`。完全一致の小文字 `default` だけ、スコープ付きファイルが無いときに古い `endpoint-selection.json` を読むことがあります。`Default` を含む名前付きセッションはその旧ファイルも埋め込み選択も取り込みません。UI でマシンを選ぶとスコープ付きファイルを書きます。自動フォールバック、復旧、再接続はディスク上の最後の明示的な選択を保ち、再許可してもフォーカスを奪いません。名前付きローカルセッションを削除しても、これらの共有クライアントファイルは残り、同じ名前を作り直すと再利用します。
 
 共有カタログへの書き込みは、制限がないとき `local_sessions` を省略します。古い厳密な読み取り側は、空の一覧を含むそのフィールドがあるカタログを拒否します。ダウングレード前に、制限済みプロファイルへ `--all-local-sessions` を実行してください。書き込みは、グローバルに無効な埋め込み選択も消します。読み取りだけではファイルを書き換えません。
 

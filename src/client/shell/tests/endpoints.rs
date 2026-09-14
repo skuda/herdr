@@ -1653,7 +1653,7 @@ fn locally_allowed_disabled_rows_remain_visible_without_connections() {
         state.endpoint_status(&remote),
         Some(ClientEndpointStatus::Disabled)
     );
-    profile.local_sessions = Some(vec!["tradingdroid".into()]);
+    profile.local_sessions = Some(vec!["sandbox".into()]);
     catalog.ssh = vec![profile];
     state.set_endpoint_catalog(&catalog.profiles_for_local_session("default"));
     assert!(state.endpoint_status(&remote).is_none());

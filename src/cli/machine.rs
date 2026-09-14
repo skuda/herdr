@@ -510,12 +510,7 @@ mod tests {
         let id = "0123456789abcdef0123456789abcdef";
         let cases: &[(&[&str], bool)] = &[
             (
-                &[
-                    id,
-                    "--local-session",
-                    "default",
-                    "--local-session=tradingdroid",
-                ],
+                &[id, "--local-session", "default", "--local-session=sandbox"],
                 true,
             ),
             (&[id, "--all-local-sessions"], true),

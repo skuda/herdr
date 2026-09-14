@@ -79,11 +79,11 @@ A locally allowed disabled profile stays in the sidebar as Disabled and does not
 
 Availability is local configuration, not a security boundary. It limits which local Herdr sessions can use a saved SSH machine. It does not change the remote session on the SSH host.
 
-The local session is `HERDR_SESSION` when that variable is set, otherwise `default`. Named sessions such as `tradingdroid` are local. The saved `session` field is the remote Herdr session on the SSH host.
+The local session is `HERDR_SESSION` when that variable is set, otherwise `default`. Named sessions such as `sandbox` are local. The saved `session` field is the remote Herdr session on the SSH host.
 
 ```bash
 herdr machine availability <profile-id> --local-session default
-herdr machine availability <profile-id> --local-session default --local-session tradingdroid
+herdr machine availability <profile-id> --local-session default --local-session sandbox
 herdr machine availability <profile-id> --all-local-sessions
 herdr machine availability <profile-id> --no-local-sessions
 ```
@@ -96,7 +96,7 @@ herdr machine availability <profile-id> --no-local-sessions
 
 An invalid inherited local session with a socket override starts Local-only. Saved machines are not loaded, the catalog watcher does not start, and scoped selection files are not written. The existing notice surface shows the validation error. Plain socket API commands keep their existing override behavior.
 
-Each local session stores its selected machine in `endpoint-selections/session-<lowercase hex of the session-name bytes>.json`. Examples: `default` is `session-64656661756c74.json`; `Default` is `session-44656661756c74.json`; `tradingdroid` is `session-74726164696e6764726f6964.json`. For the exact lowercase name `default` only, a missing scoped file may read the older `endpoint-selection.json`. Named sessions, including `Default`, do not import that legacy file or the catalog's embedded selection. Selecting a machine in the UI writes the scoped file. Automatic fallback, recovery, and reconnect keep the last explicit choice on disk and do not steal focus when a machine is reallowed. Deleting a named local session does not remove these shared client files; recreating the same name reuses them.
+Each local session stores its selected machine in `endpoint-selections/session-<lowercase hex of the session-name bytes>.json`. Examples: `default` is `session-64656661756c74.json`; `Default` is `session-44656661756c74.json`; `sandbox` is `session-73616e64626f78.json`. For the exact lowercase name `default` only, a missing scoped file may read the older `endpoint-selection.json`. Named sessions, including `Default`, do not import that legacy file or the catalog's embedded selection. Selecting a machine in the UI writes the scoped file. Automatic fallback, recovery, and reconnect keep the last explicit choice on disk and do not steal focus when a machine is reallowed. Deleting a named local session does not remove these shared client files; recreating the same name reuses them.
 
 Writes to the shared catalog omit `local_sessions` when unrestricted. Older strict readers reject a catalog that includes the field, including an empty list. Before downgrade, run `--all-local-sessions` on restricted profiles. Writes also clear a globally invalid embedded selected profile; a read does not rewrite the file.
 

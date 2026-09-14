@@ -996,8 +996,8 @@ mod tests {
             DEFAULT_SESSION_NAME
         );
 
-        std::env::set_var(SESSION_ENV_VAR, "tradingdroid");
-        assert_eq!(validated_local_session_name().unwrap(), "tradingdroid");
+        std::env::set_var(SESSION_ENV_VAR, "sandbox");
+        assert_eq!(validated_local_session_name().unwrap(), "sandbox");
 
         std::env::set_var(SESSION_ENV_VAR, "Default");
         assert_eq!(validated_local_session_name().unwrap(), "Default");
@@ -1133,16 +1133,16 @@ mod tests {
         std::env::set_var("XDG_STATE_HOME", root.join("state"));
         std::env::remove_var(SESSION_ENV_VAR);
         clear_explicit_session_for_test();
-        let session_dir = data_dir_for(Some("tradingdroid"));
+        let session_dir = data_dir_for(Some("sandbox"));
         std::fs::create_dir_all(&session_dir).unwrap();
         let client = crate::config::state_dir().join("client");
         std::fs::create_dir_all(client.join("endpoint-selections")).unwrap();
         std::fs::write(
             client.join("endpoints.json"),
-            r#"{"version":1,"ssh":[{"id":"0123456789abcdef0123456789abcdef","label":"Build","target":"build","session":"agents","enabled":true,"local_sessions":["tradingdroid"]}]}"#,
+            r#"{"version":1,"ssh":[{"id":"0123456789abcdef0123456789abcdef","label":"Build","target":"build","session":"agents","enabled":true,"local_sessions":["sandbox"]}]}"#,
         )
         .unwrap();
-        let scoped = crate::client::endpoint::scoped_selection_path("tradingdroid").unwrap();
+        let scoped = crate::client::endpoint::scoped_selection_path("sandbox").unwrap();
         std::fs::write(
             &scoped,
             r#"{"version":1,"selected_profile":"0123456789abcdef0123456789abcdef"}"#,
@@ -1150,7 +1150,7 @@ mod tests {
         .unwrap();
         let catalog_before = std::fs::read(client.join("endpoints.json")).unwrap();
         let scoped_before = std::fs::read(&scoped).unwrap();
-        delete_session("tradingdroid").unwrap();
+        delete_session("sandbox").unwrap();
         assert!(!session_dir.exists());
         assert_eq!(
             std::fs::read(client.join("endpoints.json")).unwrap(),
