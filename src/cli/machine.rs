@@ -343,11 +343,10 @@ fn parse_availability_args(args: &[String]) -> Result<(ProfileId, AvailabilityAr
             unknown => return Err(format!("unknown machine availability option: {unknown}")),
         }
     }
-    let form_count = usize::from(!sessions.is_empty()) + usize::from(all) + usize::from(none);
-    let availability = match (sessions.is_empty(), all, none, form_count) {
-        (false, false, false, 1) => AvailabilityArgs::Sessions(sessions),
-        (true, true, false, 1) => AvailabilityArgs::All,
-        (true, false, true, 1) => AvailabilityArgs::None,
+    let availability = match (sessions.is_empty(), all, none) {
+        (false, false, false) => AvailabilityArgs::Sessions(sessions),
+        (true, true, false) => AvailabilityArgs::All,
+        (true, false, true) => AvailabilityArgs::None,
         _ => return Err(usage.into()),
     };
     Ok((id, availability))

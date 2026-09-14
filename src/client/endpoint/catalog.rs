@@ -86,16 +86,14 @@ impl SavedSshEndpoint {
             return Err("SSH target must not contain a password".into());
         }
         crate::session::validate_name(&self.session)?;
-        normalize_local_sessions(self.local_sessions.as_deref())?;
+        validate_local_sessions(self.local_sessions.as_deref())?;
         Ok(())
     }
 }
 
-pub(crate) fn normalize_local_sessions(
-    sessions: Option<&[String]>,
-) -> Result<Option<Vec<String>>, String> {
+fn validate_local_sessions(sessions: Option<&[String]>) -> Result<(), String> {
     let Some(sessions) = sessions else {
-        return Ok(None);
+        return Ok(());
     };
     if sessions.len() > MAX_LOCAL_SESSIONS {
         return Err(format!(
@@ -105,6 +103,16 @@ pub(crate) fn normalize_local_sessions(
     for name in sessions {
         crate::session::validate_name(name)?;
     }
+    Ok(())
+}
+
+pub(crate) fn normalize_local_sessions(
+    sessions: Option<&[String]>,
+) -> Result<Option<Vec<String>>, String> {
+    validate_local_sessions(sessions)?;
+    let Some(sessions) = sessions else {
+        return Ok(None);
+    };
     let mut normalized = sessions.to_vec();
     normalized.sort();
     normalized.dedup();
@@ -169,16 +177,21 @@ impl EndpointCatalog {
             &scoped_selection_path(local_session)?,
             local_session,
         )?;
-        catalog.ssh = catalog.profiles_for_local_session(local_session);
+        catalog
+            .ssh
+            .retain(|profile| profile.locally_allowed_in(local_session));
         Ok(catalog)
     }
 
     pub(crate) fn load_profiles_for_local_session(
         local_session: &str,
     ) -> Result<Vec<SavedSshEndpoint>, String> {
-        Ok(Self::load_raw()?.profiles_for_local_session(local_session))
+        let mut profiles = Self::load_raw()?.ssh;
+        profiles.retain(|profile| profile.locally_allowed_in(local_session));
+        Ok(profiles)
     }
 
+    #[cfg(test)]
     pub(crate) fn profiles_for_local_session(&self, local_session: &str) -> Vec<SavedSshEndpoint> {
         self.ssh
             .iter()
@@ -287,11 +300,12 @@ impl EndpointCatalog {
         session: String,
         prepare: impl FnOnce(&str, &str) -> io::Result<()>,
     ) -> Result<ProfileId, AddProfileError> {
-        let catalog = Self::load_from_path(catalog_path).map_err(AddProfileError::Load)?;
+        let mut catalog = Self::load_from_path(catalog_path).map_err(AddProfileError::Load)?;
         catalog
-            .clone()
             .add_ssh(label.clone(), &target, session.clone())
             .map_err(AddProfileError::Invalid)?;
+        // Remote preparation can wait for approval. Keep it outside the lock, then reread
+        // the catalog and recheck capacity under the lock before saving.
         prepare(&target, &session).map_err(AddProfileError::Prepare)?;
         Self::update_profiles_at(catalog_path, lock_path, timeout, |catalog| {
             catalog.add_ssh(label, target, session)
@@ -317,43 +331,6 @@ impl EndpointCatalog {
             .store_to_path(catalog_path)
             .map_err(CatalogUpdateError::Storage)?;
         Ok(result)
-    }
-
-    #[cfg(test)]
-    fn load_from_paths(catalog_path: &Path, selection_path: &Path) -> Result<Self, String> {
-        let mut catalog = Self::load_from_path(catalog_path)?;
-        match load_selection_from_path(selection_path) {
-            Ok(Some(selection)) => {
-                let valid = selection.selected_profile.as_ref().is_none_or(|selected| {
-                    catalog
-                        .ssh
-                        .iter()
-                        .any(|profile| &profile.id == selected && profile.enabled)
-                });
-                if valid {
-                    catalog.selected_profile = selection.selected_profile;
-                } else {
-                    tracing::warn!(
-                        path = %selection_path.display(),
-                        "saved endpoint selection is absent or disabled; using Local"
-                    );
-                    catalog.selected_profile = None;
-                }
-            }
-            Ok(None) => {}
-            Err(error) => {
-                tracing::warn!(
-                    %error,
-                    path = %selection_path.display(),
-                    "saved endpoint selection is unavailable; using Local"
-                );
-                catalog.selected_profile = None;
-            }
-        }
-        if !catalog.embedded_selection_is_globally_valid() {
-            catalog.selected_profile = None;
-        }
-        Ok(catalog)
     }
 
     fn store_selection_to_path(&self, path: &Path) -> Result<(), String> {
@@ -526,17 +503,6 @@ impl EndpointCatalog {
         })
     }
 
-    fn resolved_embedded_selection(&self, local_session: &str) -> Option<&ProfileId> {
-        let selected = self.selected_profile.as_ref()?;
-        if ProfileId::parse(selected.as_str()).is_err() {
-            return None;
-        }
-        self.ssh
-            .iter()
-            .any(|profile| &profile.id == selected && profile.is_available_in(local_session))
-            .then_some(selected)
-    }
-
     fn normalize_embedded_selection(&mut self) {
         if !self.embedded_selection_is_globally_valid() {
             self.selected_profile = None;
@@ -677,10 +643,16 @@ fn selection_path() -> PathBuf {
 
 pub(crate) fn scoped_selection_path(local_session: &str) -> Result<PathBuf, String> {
     crate::session::validate_name(local_session)?;
+    let mut encoded = String::with_capacity(8 + local_session.len() * 2 + 5);
+    encoded.push_str("session-");
+    for byte in local_session.as_bytes() {
+        encoded.push_str(&format!("{byte:02x}"));
+    }
+    encoded.push_str(".json");
     Ok(crate::config::state_dir()
         .join("client")
         .join("endpoint-selections")
-        .join(format!("{local_session}.json")))
+        .join(encoded))
 }
 
 fn resolve_selected_profile(
@@ -715,9 +687,13 @@ fn resolve_selected_profile(
             None
         }
     };
-    let mut resolved = catalog.clone();
-    resolved.selected_profile = candidate;
-    resolved.resolved_embedded_selection(local_session).cloned()
+    candidate.filter(|selected| {
+        ProfileId::parse(selected.as_str()).is_ok()
+            && catalog
+                .ssh
+                .iter()
+                .any(|profile| &profile.id == selected && profile.is_available_in(local_session))
+    })
 }
 
 #[cfg(test)]
@@ -805,6 +781,90 @@ mod tests {
         assert_eq!(loaded, catalog);
         assert_eq!(loaded.ssh[0].id, id);
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn scoped_selection_path_encodes_validated_session_bytes() {
+        let default = scoped_selection_path("default").unwrap();
+        assert_eq!(
+            default.file_name().and_then(|name| name.to_str()),
+            Some("session-64656661756c74.json")
+        );
+        let titled = scoped_selection_path("Default").unwrap();
+        assert_eq!(
+            titled.file_name().and_then(|name| name.to_str()),
+            Some("session-44656661756c74.json")
+        );
+        let named = scoped_selection_path("tradingdroid").unwrap();
+        assert_eq!(
+            named.file_name().and_then(|name| name.to_str()),
+            Some("session-74726164696e6764726f6964.json")
+        );
+        assert_ne!(default.file_name(), titled.file_name());
+        let folded: Vec<_> = ["default", "Default", "DEFAULT", "DeFaUlT"]
+            .into_iter()
+            .map(|name| {
+                scoped_selection_path(name)
+                    .unwrap()
+                    .file_name()
+                    .unwrap()
+                    .to_os_string()
+                    .to_ascii_lowercase()
+            })
+            .collect();
+        for (index, name) in folded.iter().enumerate() {
+            assert!(
+                !folded[..index].contains(name),
+                "case-distinct session names must stay distinct after ASCII casefold"
+            );
+        }
+        let max = "a".repeat(64);
+        let max_path = scoped_selection_path(&max).unwrap();
+        let component = max_path.file_name().and_then(|name| name.to_str()).unwrap();
+        assert_eq!(component.len(), 141);
+        assert!(component.starts_with("session-"));
+        assert!(component.ends_with(".json"));
+        assert!(!component.contains('/'));
+        assert!(!component.contains('\\'));
+        assert!(scoped_selection_path("bad/name").is_err());
+        assert!(scoped_selection_path("").is_err());
+        assert!(scoped_selection_path(".").is_err());
+        assert!(scoped_selection_path(&"a".repeat(65)).is_err());
+        let id = ProfileId::parse("0123456789abcdef0123456789abcdef").unwrap();
+        let catalog = EndpointCatalog {
+            selected_profile: Some(id.clone()),
+            ssh: vec![SavedSshEndpoint {
+                id: id.clone(),
+                label: "Build".into(),
+                target: "build".into(),
+                session: "agents".into(),
+                enabled: true,
+                local_sessions: None,
+            }],
+            ..EndpointCatalog::default()
+        };
+        let parent = path("default-case-fallback")
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let _ = std::fs::remove_dir_all(&parent);
+        std::fs::create_dir_all(&parent).unwrap();
+        let missing_scoped = parent.join("missing-scoped.json");
+        let legacy = parent.join("endpoint-selection.json");
+        std::fs::write(
+            &legacy,
+            format!(r#"{{"version":1,"selected_profile":"{id}"}}"#),
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_selected_profile(&catalog, "default", &missing_scoped, &legacy),
+            Some(id.clone())
+        );
+        assert_eq!(
+            resolve_selected_profile(&catalog, "Default", &missing_scoped, &legacy),
+            None
+        );
+        std::fs::remove_dir_all(&parent).unwrap();
     }
 
     #[test]
@@ -929,8 +989,15 @@ mod tests {
         assert!(catalog.select_ssh(&id));
         catalog.store_to_path(&catalog_path).unwrap();
         std::fs::write(&selection_path, b"not json").unwrap();
+        let scoped_path = catalog_path.with_file_name("default.json");
 
-        let loaded = EndpointCatalog::load_from_paths(&catalog_path, &selection_path).unwrap();
+        let loaded = EndpointCatalog::load_for_local_session_from_paths(
+            &catalog_path,
+            &selection_path,
+            &scoped_path,
+            crate::session::DEFAULT_SESSION_NAME,
+        )
+        .unwrap();
         assert_eq!(loaded.ssh.len(), 1);
         assert_eq!(loaded.ssh[0].id, id);
         assert_eq!(loaded.selected_profile, None);
@@ -957,8 +1024,15 @@ mod tests {
             "endpoint selection",
         )
         .unwrap();
+        let scoped_path = catalog_path.with_file_name("default.json");
 
-        let loaded = EndpointCatalog::load_from_paths(&catalog_path, &selection_path).unwrap();
+        let loaded = EndpointCatalog::load_for_local_session_from_paths(
+            &catalog_path,
+            &selection_path,
+            &scoped_path,
+            crate::session::DEFAULT_SESSION_NAME,
+        )
+        .unwrap();
         assert_eq!(loaded.ssh[0].id, saved);
         assert_eq!(loaded.selected_profile, None);
         std::fs::remove_dir_all(catalog_path.parent().unwrap()).unwrap();
@@ -1331,7 +1405,12 @@ mod tests {
         let malformed = EndpointCatalog::load_from_path(&path).unwrap();
         assert_eq!(malformed.ssh.len(), 1);
         assert_eq!(malformed.ssh[0].id.as_str(), profile_id);
-        assert!(malformed.resolved_embedded_selection("default").is_none());
+        let missing_scoped = path.with_file_name("missing-scoped.json");
+        let missing_legacy = path.with_file_name("missing-legacy.json");
+        assert!(
+            resolve_selected_profile(&malformed, "default", &missing_scoped, &missing_legacy)
+                .is_none()
+        );
         assert!(malformed.validate().is_err());
         assert!(malformed.validate_profiles().is_ok());
         let original = std::fs::read(&path).unwrap();
@@ -1349,7 +1428,10 @@ mod tests {
         };
         assert!(disabled.validate_profiles().is_ok());
         assert!(disabled.validate().is_err());
-        assert!(disabled.resolved_embedded_selection("default").is_none());
+        assert!(
+            resolve_selected_profile(&disabled, "default", &missing_scoped, &missing_legacy)
+                .is_none()
+        );
 
         let absent = EndpointCatalog {
             selected_profile: Some(ProfileId::parse("fedcba9876543210fedcba9876543210").unwrap()),
@@ -1357,7 +1439,10 @@ mod tests {
             ..EndpointCatalog::default()
         };
         assert!(absent.validate_profiles().is_ok());
-        assert!(absent.resolved_embedded_selection("default").is_none());
+        assert!(
+            resolve_selected_profile(&absent, "default", &missing_scoped, &missing_legacy)
+                .is_none()
+        );
 
         let disallowed = EndpointCatalog {
             selected_profile: Some(present.id.clone()),
@@ -1367,10 +1452,23 @@ mod tests {
         assert!(disallowed.validate_profiles().is_ok());
         assert!(disallowed.validate().is_ok());
         assert!(disallowed.embedded_selection_is_globally_valid());
-        assert!(disallowed.resolved_embedded_selection("default").is_some());
-        assert!(disallowed
-            .resolved_embedded_selection("tradingdroid")
-            .is_none());
+        assert!(
+            resolve_selected_profile(&disallowed, "default", &missing_scoped, &missing_legacy)
+                .is_some()
+        );
+        let named_scoped = path.with_file_name("tradingdroid.json");
+        std::fs::write(
+            &named_scoped,
+            format!(r#"{{"version":1,"selected_profile":"{profile_id}"}}"#),
+        )
+        .unwrap();
+        assert!(resolve_selected_profile(
+            &disallowed,
+            "tradingdroid",
+            &named_scoped,
+            &missing_legacy
+        )
+        .is_none());
 
         disallowed.store_to_path(&path).unwrap();
         let reloaded = EndpointCatalog::load_from_path(&path).unwrap();

@@ -70,8 +70,9 @@ pub(super) fn spawn_due_if_ready(pending: &PendingCatalog, spawn: impl FnOnce())
     }
 }
 
-// Only called between surface handoffs: removing a source must not invalidate an in-flight
-// rollback. Connection attempts are independent and fenced by supervisor generations.
+// Apply profile changes only between surface handoffs so retirement cannot invalidate rollback.
+// Pending valid changes pause spawn_due, including retries; supervisor generations fence
+// results from attempts already started.
 pub(super) fn apply_profiles(
     state: &mut ClientState,
     endpoints: &mut endpoint::EndpointRegistry,

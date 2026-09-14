@@ -196,11 +196,12 @@ impl Harness {
     fn write_selection(&self, name: &str, body: Value) {
         let dir = self.catalog_path().join("endpoint-selections");
         fs::create_dir_all(&dir).unwrap();
-        fs::write(
-            dir.join(format!("{name}.json")),
-            serde_json::to_vec(&body).unwrap(),
-        )
-        .unwrap();
+        let file = if name == "default" {
+            "session-64656661756c74.json".to_string()
+        } else {
+            encoded_selection_file(name)
+        };
+        fs::write(dir.join(file), serde_json::to_vec(&body).unwrap()).unwrap();
     }
 
     fn write_legacy_selection(&self, body: Value) {
@@ -210,6 +211,15 @@ impl Harness {
         )
         .unwrap();
     }
+}
+
+fn encoded_selection_file(name: &str) -> String {
+    let mut encoded = String::from("session-");
+    for byte in name.as_bytes() {
+        encoded.push_str(&format!("{byte:02x}"));
+    }
+    encoded.push_str(".json");
+    encoded
 }
 
 impl Drop for Harness {
@@ -621,12 +631,13 @@ fn machine_list_json_uses_raw_profiles_and_scoped_preference() {
     let scoped_before = fs::read(
         harness
             .catalog_path()
-            .join("endpoint-selections/default.json"),
+            .join("endpoint-selections/session-64656661756c74.json"),
     )
     .unwrap();
     assert!(!harness
         .catalog_path()
-        .join("endpoint-selections/tradingdroid.json")
+        .join("endpoint-selections")
+        .join(encoded_selection_file("tradingdroid"))
         .exists());
 
     let default_list = success(
@@ -672,13 +683,14 @@ fn machine_list_json_uses_raw_profiles_and_scoped_preference() {
         fs::read(
             harness
                 .catalog_path()
-                .join("endpoint-selections/default.json")
+                .join("endpoint-selections/session-64656661756c74.json")
         )
         .unwrap(),
         scoped_before
     );
     assert!(!harness
         .catalog_path()
-        .join("endpoint-selections/tradingdroid.json")
+        .join("endpoint-selections")
+        .join(encoded_selection_file("tradingdroid"))
         .exists());
 }

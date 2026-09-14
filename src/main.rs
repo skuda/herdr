@@ -786,8 +786,8 @@ fn main() -> io::Result<()> {
 
     let saved_federation = match crate::session::validated_local_session_name() {
         Ok(local_session) => {
-            client::endpoint::EndpointCatalog::load_for_local_session(&local_session)
-                .is_ok_and(|catalog| catalog.has_enabled_ssh())
+            client::endpoint::EndpointCatalog::load_profiles_for_local_session(&local_session)
+                .is_ok_and(|profiles| profiles.iter().any(|profile| profile.enabled))
         }
         Err(_) => false,
     };
