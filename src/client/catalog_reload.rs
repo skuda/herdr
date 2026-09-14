@@ -538,6 +538,108 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn live_catalog_removal_clears_retired_endpoint_graphics() {
+        let now = Instant::now();
+        let mut catalog = EndpointCatalog::default();
+        let retired = catalog.add_ssh("Retired", "retired", "main").unwrap();
+        let survivor = catalog.add_ssh("Survivor", "survivor", "main").unwrap();
+        let retired_id = ClientEndpointId::Ssh(retired.clone());
+        let survivor_id = ClientEndpointId::Ssh(survivor.clone());
+        let mut state = state();
+        state.pending_surface_graphics.insert(
+            (retired_id.clone(), 11, 41),
+            crate::protocol::SurfaceGraphicsAssetKey {
+                source: crate::protocol::SurfaceGraphicsSource::Terminal {
+                    target: crate::protocol::SurfaceGraphicsTarget::Pane {
+                        pane_id: "w1:p1".into(),
+                    },
+                    image_id: 41,
+                },
+                image_width: 2,
+                image_height: 1,
+                format: crate::protocol::SurfaceGraphicsFormat::Rgba,
+                data_len: 8,
+                data_fingerprint: 1,
+            },
+        );
+        state.pending_surface_graphics.insert(
+            (survivor_id.clone(), 12, 42),
+            crate::protocol::SurfaceGraphicsAssetKey {
+                source: crate::protocol::SurfaceGraphicsSource::Terminal {
+                    target: crate::protocol::SurfaceGraphicsTarget::Pane {
+                        pane_id: "w1:p2".into(),
+                    },
+                    image_id: 42,
+                },
+                image_width: 2,
+                image_height: 1,
+                format: crate::protocol::SurfaceGraphicsFormat::Rgba,
+                data_len: 8,
+                data_fingerprint: 2,
+            },
+        );
+        state.retired_direct_graphics = Some((retired_id.clone(), 11, 41));
+        assert!(state.direct_graphics_response.lock().unwrap().arm(11, 41));
+
+        let mut supervisors = EndpointSupervisors::new(&catalog.ssh, now);
+        let mut endpoints = EndpointRegistry::empty();
+        endpoints.insert(
+            ClientEndpointId::Local,
+            Transport(Arc::new(AtomicUsize::new(0))),
+            1,
+            Default::default(),
+            true,
+        );
+        endpoints.insert(
+            retired_id.clone(),
+            Transport(Arc::new(AtomicUsize::new(0))),
+            2,
+            Default::default(),
+            false,
+        );
+        endpoints.insert(
+            survivor_id.clone(),
+            Transport(Arc::new(AtomicUsize::new(0))),
+            3,
+            Default::default(),
+            false,
+        );
+        let mut commands = endpoint_commands::EndpointCommands::default();
+        let remaining = catalog
+            .ssh
+            .iter()
+            .filter(|profile| profile.id != retired)
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(!apply_profiles(
+            &mut state,
+            &mut endpoints,
+            &mut commands,
+            &mut supervisors,
+            &mut catalog,
+            remaining,
+            now
+        ));
+        assert!(!state
+            .pending_surface_graphics
+            .keys()
+            .any(|(owner, _, _)| owner == &retired_id));
+        assert!(state
+            .pending_surface_graphics
+            .contains_key(&(survivor_id, 12, 42)));
+        assert!(state.retired_direct_graphics.is_none());
+        assert_eq!(
+            state
+                .direct_graphics_response
+                .lock()
+                .unwrap()
+                .consume(b"\x1b_Gi=41;OK\x1b\\"),
+            Some(None)
+        );
+    }
+
     #[test]
     fn malformed_live_catalog_keeps_connections_then_recovers() {
         let now = Instant::now();
