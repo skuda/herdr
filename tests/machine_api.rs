@@ -520,6 +520,18 @@ fn machine_api_rejects_disallowed_and_invalid_context_without_ssh() {
 }
 
 #[test]
+fn machine_list_rejects_invalid_inherited_context_with_socket_override() {
+    let harness = Harness::new();
+    let mut list_cmd = harness.command(&["machine", "list", "--json"]);
+    list_cmd.env("HERDR_SESSION", "bad/name");
+    let output = bounded_output(list_cmd);
+    assert_eq!(output.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(err.contains("session name"), "{err}");
+    harness.assert_no_machine_connection();
+}
+
+#[test]
 fn machine_api_disabled_and_ambiguous_errors_precede_availability() {
     let harness = Harness::new();
     harness.write_catalog(json!({

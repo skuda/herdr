@@ -913,4 +913,88 @@ mod tests {
         assert_eq!(std::fs::read(&selection_path).unwrap(), before);
         std::fs::remove_dir_all(&parent).unwrap();
     }
+
+    #[test]
+    fn successor_activation_preserves_intervening_scoped_preference() {
+        let parent =
+            std::env::temp_dir().join(format!("herdr-successor-preserve-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&parent);
+        std::fs::create_dir_all(&parent).unwrap();
+        let selection_path = parent.join("default.json");
+        let mut catalog = EndpointCatalog::default();
+        let other = catalog.add_ssh("Other", "other", "agents").unwrap();
+        std::fs::write(
+            &selection_path,
+            format!(r#"{{"version":1,"selected_profile":"{other}"}}"#),
+        )
+        .unwrap();
+        let before = std::fs::read(&selection_path).unwrap();
+
+        let mut state = test_state();
+        let mut endpoints = endpoint::EndpointRegistry::empty();
+        let mut commands = endpoint_commands::EndpointCommands::default();
+        let mut pending = Some(endpoint::PendingEndpointActivation::test_ready_successor(
+            ClientEndpointId::Local,
+            Some(shell::ClientEndpointFocusTarget::Pane("local-pane".into())),
+        ));
+        let event =
+            complete_endpoint_activation(&mut state, &mut endpoints, &mut pending, &mut commands)
+                .unwrap()
+                .expect("successor activation");
+        let ClientLoopEvent::ActivateEndpoint(request) = event else {
+            panic!("complete_endpoint_activation must produce ActivateEndpoint");
+        };
+        assert_eq!(request.persistence, SelectionPersistence::Preserve);
+        assert!(request.force);
+        assert_eq!(request.endpoint_id, ClientEndpointId::Local);
+
+        let mut serial = 1;
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        assert!(accept_endpoint_activation_with_path(
+            &mut catalog,
+            &mut state,
+            &mut endpoints,
+            &mut commands,
+            &mut pending,
+            &mut serial,
+            request,
+            Some("default"),
+            Some(&selection_path),
+            Instant::now(),
+            &tx,
+        )
+        .unwrap());
+        assert_eq!(std::fs::read(&selection_path).unwrap(), before);
+
+        let absent_path = parent.join("tradingdroid.json");
+        assert!(!absent_path.exists());
+        pending = Some(endpoint::PendingEndpointActivation::test_ready_successor(
+            ClientEndpointId::Local,
+            Some(shell::ClientEndpointFocusTarget::Pane("local-pane".into())),
+        ));
+        let event =
+            complete_endpoint_activation(&mut state, &mut endpoints, &mut pending, &mut commands)
+                .unwrap()
+                .expect("successor activation");
+        let ClientLoopEvent::ActivateEndpoint(request) = event else {
+            panic!("complete_endpoint_activation must produce ActivateEndpoint");
+        };
+        assert_eq!(request.persistence, SelectionPersistence::Preserve);
+        assert!(accept_endpoint_activation_with_path(
+            &mut catalog,
+            &mut state,
+            &mut endpoints,
+            &mut commands,
+            &mut pending,
+            &mut serial,
+            request,
+            Some("tradingdroid"),
+            Some(&absent_path),
+            Instant::now(),
+            &tx,
+        )
+        .unwrap());
+        assert!(!absent_path.exists());
+        std::fs::remove_dir_all(&parent).unwrap();
+    }
 }

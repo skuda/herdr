@@ -308,8 +308,6 @@ impl EndpointCatalog {
         timeout: Duration,
         mutate: impl FnOnce(&mut Self) -> Result<T, String>,
     ) -> Result<T, CatalogUpdateError> {
-        #[cfg(test)]
-        run_lock_acquisition_boundary_hook();
         let _lock =
             acquire_catalog_lock(lock_path, timeout).map_err(CatalogUpdateError::Storage)?;
         let mut catalog =
@@ -759,6 +757,8 @@ fn acquire_catalog_lock(lock_path: &Path, timeout: Duration) -> Result<File, Str
         match file.try_lock() {
             Ok(()) => return Ok(file),
             Err(TryLockError::WouldBlock) => {
+                #[cfg(test)]
+                run_lock_acquisition_boundary_hook();
                 if Instant::now() >= deadline {
                     return Err("endpoint catalog is busy; try again".into());
                 }
@@ -1630,27 +1630,23 @@ mod tests {
         let second = catalog.add_ssh("Two", "two", "default").unwrap();
         catalog.store_to_path(&catalog_path).unwrap();
         let (holding_tx, holding_rx) = std::sync::mpsc::channel();
-        let (at_boundary_tx, at_boundary_rx) = std::sync::mpsc::channel();
-        let (released_tx, released_rx) = std::sync::mpsc::channel();
+        let (contending_tx, contending_rx) = std::sync::mpsc::channel();
         let wait = Duration::from_secs(2);
         let incumbent_path = catalog_path.clone();
         let first_id = first.clone();
         let incumbent = std::thread::spawn(move || {
-            let result = update_at(&incumbent_path, |catalog| {
+            update_at(&incumbent_path, |catalog| {
                 holding_tx.send(()).unwrap();
-                at_boundary_rx.recv_timeout(wait).unwrap();
+                contending_rx.recv_timeout(wait).unwrap();
                 catalog.rename_ssh(&first_id, "Renamed").map(|_| ())
-            });
-            released_tx.send(()).unwrap();
-            result
+            })
         });
         holding_rx.recv_timeout(wait).unwrap();
         let second_path = catalog_path.clone();
         let second_id = second.clone();
         let waiter = std::thread::spawn(move || {
             set_lock_acquisition_boundary_hook(move || {
-                at_boundary_tx.send(()).unwrap();
-                released_rx.recv_timeout(wait).unwrap();
+                contending_tx.send(()).unwrap();
             });
             update_at(&second_path, |catalog| {
                 catalog.set_enabled(&second_id, false);

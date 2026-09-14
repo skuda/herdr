@@ -47,6 +47,7 @@ pub(super) fn command() -> Command {
                 arg.value_parser(|id: &str| {
                     crate::client::endpoint::ProfileId::parse(id).map(|id| id.to_string())
                 })
+                .help("Put <profile-id> before availability options.")
             })
             .arg(
                 repeatable_option("local-session", "NAME")
@@ -61,7 +62,11 @@ pub(super) fn command() -> Command {
                 ArgGroup::new("availability")
                     .args(["local-session", "all-local-sessions", "no-local-sessions"])
                     .required(true),
-            ),
+            )
+            .override_usage(
+                "herdr machine availability <profile-id> (--local-session <name> [--local-session <name> ...] | --all-local-sessions | --no-local-sessions)",
+            )
+            .after_help("Put <profile-id> before availability options."),
         )
 }
 

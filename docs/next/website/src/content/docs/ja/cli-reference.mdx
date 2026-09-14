@@ -63,7 +63,7 @@ herdr machine availability <profile-id> --no-local-sessions
 
 `machine add` はリモートのデフォルトセッションを使います。名前付きセッションを使う場合だけ `--remote-session <name>` を追加します。スクリプトでは `machine list` に `--json` を追加できます。ローカルセッションごとの利用可否は[ローカルセッションの利用可否](/ja/docs/connecting-machines/#ローカルセッションの利用可否)を参照してください。
 
-`machine availability` は次のいずれか 1 形式です。`--local-session <name>` を 1 回以上、`--all-local-sessions`、または `--no-local-sessions`。`--local-session` は繰り返し、または `--local-session=name` で指定します。これらの形式は混ぜません。`--local-session` の名前はローカルセッション名と同じ規則です。ASCII の英数字、`.`、`_`、`-`、1 から 64 バイト、`.` と `..` は不可。まだ存在しない名前も使えます。並べ替えと重複削除の前に最大 64 件です。`--all-local-sessions` は制限を省略します。`--no-local-sessions` は空の一覧を保存します。
+`machine availability` では、フラグの前にプロファイル ID を置きます。形式は次のいずれか 1 つです。`--local-session <name>` を 1 回以上、`--all-local-sessions`、または `--no-local-sessions`。`--local-session` は繰り返し、または `--local-session=name` で指定します。これらの形式は混ぜません。`--local-session` の名前はローカルセッション名と同じ規則です。ASCII の英数字、`.`、`_`、`-`、1 から 64 バイト、`.` と `..` は不可。まだ存在しない名前も使えます。並べ替えと重複削除の前に最大 64 件です。`--all-local-sessions` は制限を省略します。`--no-local-sessions` は空の一覧を保存します。
 
 `machine add` はリモート側の Herdr が必要な機能を備えているか確認し、必要な場合だけ承認を得てインストールまたは更新します。指定したセッションのバックグラウンドサーバーを起動してからプロファイルを保存します。互換性があればリリースバージョンは一致しなくてもかまいません。インストールや再起動の承認が必要な場合は、対話型ターミナルで実行してください。セットアップが失敗またはキャンセルされた場合、プロファイルは保存されません。実行中サーバーの置き換えには明示的な承認が必要で、デフォルトの回答は No です。停止するとペインのプロセスも終了します。`machine add` は実験的なハンドオフを暗黙に有効にしません。
 

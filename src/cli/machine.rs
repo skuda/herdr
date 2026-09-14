@@ -66,8 +66,13 @@ fn list(args: &[String]) -> std::io::Result<i32> {
         }
     };
     let catalog = load_raw_catalog()?;
-    let local_session = crate::session::validated_local_session_name()
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    let local_session = match crate::session::validated_local_session_name() {
+        Ok(name) => name,
+        Err(error) => {
+            eprintln!("error: {error}");
+            return Ok(2);
+        }
+    };
     let selected = catalog.selected_profile_for_local_session(&local_session);
     let rows = catalog
         .ssh
@@ -292,7 +297,7 @@ enum AvailabilityArgs {
 }
 
 fn parse_availability_args(args: &[String]) -> Result<(ProfileId, AvailabilityArgs), String> {
-    let usage = "usage: herdr machine availability <profile-id> --local-session <name> [--local-session <name> ...] | --all-local-sessions | --no-local-sessions";
+    let usage = "usage: herdr machine availability <profile-id> (--local-session <name> [--local-session <name> ...] | --all-local-sessions | --no-local-sessions)";
     let Some((raw_id, rest)) = args.split_first() else {
         return Err(usage.into());
     };
@@ -553,5 +558,34 @@ mod tests {
                 .1,
             AvailabilityArgs::Sessions(vec!["-dev".into()])
         );
+    }
+
+    #[test]
+    fn availability_parser_rejects_flag_first_while_clap_accepts() {
+        let id = "0123456789abcdef0123456789abcdef";
+        // Runtime is ID-first. Conventional Clap lets a required positional follow
+        // flags, so help documents ID-first order without changing Clap grammar.
+        let cases: &[&[&str]] = &[
+            &["--all-local-sessions", id],
+            &["--no-local-sessions", id],
+            &["--local-session", "default", id],
+            &["--local-session=default", id],
+        ];
+        for args in cases {
+            let owned: Vec<String> = args.iter().map(|arg| (*arg).to_owned()).collect();
+            assert!(parse_availability_args(&owned).is_err(), "runtime {args:?}");
+            let mut spec_args = vec![
+                "herdr".to_string(),
+                "machine".to_string(),
+                "availability".to_string(),
+            ];
+            spec_args.extend(owned);
+            assert!(
+                crate::cli::spec_command()
+                    .try_get_matches_from(spec_args)
+                    .is_ok(),
+                "spec {args:?}"
+            );
+        }
     }
 }
