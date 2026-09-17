@@ -98,6 +98,6 @@ herdr --remote workbox
 
 ## どの方法を使うか
 
-ローカル作業には `herdr` を使います。リモートシェル上で Herdr を tmux のように使いたいときや、スマートフォンの SSH クライアントを使っているときは `ssh you@server` してから `herdr` を使います。単独のリモートセッションをローカル UI で操作し、ローカルクリップボードの画像も貼り付けたい場合は `herdr --remote <host>` を使います。Local と複数の SSH マシンを 1 つのウィンドウで使うには、`herdr machine add <host> --label <label>` で接続先を保存します。[マシンへの接続](/ja/docs/connecting-machines/)を参照してください。
+ローカル作業には `herdr` を使います。リモートシェル上で Herdr を tmux のように使いたいときや、スマートフォンの SSH クライアントを使っているときは `ssh you@server` してから `herdr` を使います。単独のリモートセッションをローカル UI で操作し、ローカルクリップボードの画像も貼り付けたい場合は `herdr --remote <host>` を使います。Local と複数の SSH マシンを 1 つのウィンドウで使うには、`herdr machine add <host> --label <label>` で接続先を保存します。特定のローカルセッションに限るには `herdr machine availability` を使います。[ローカルセッションの利用可否](/ja/docs/connecting-machines/#ローカルセッションの利用可否)を参照してください。
 
 リモートブートストラップの詳細、名前付きリモートセッション、カスタムバイナリ、ダイレクトターミナルアタッチについては[永続化とリモートアクセス](/ja/docs/persistence-remote/)を参照してください。

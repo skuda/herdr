@@ -1200,6 +1200,59 @@ impl PendingEndpointActivation {
             None => true,
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn test_ready_successor(
+        successor: ClientEndpointId,
+        target: Option<crate::client::shell::ClientEndpointFocusTarget>,
+    ) -> Self {
+        let intent = EndpointActivationIntent {
+            endpoint_id: successor.clone(),
+            target: target.clone(),
+        };
+        Self {
+            source: EndpointLease {
+                endpoint_id: ClientEndpointId::Local,
+                generation: 1,
+                boot_id: "local-boot".into(),
+                minimum_revision: 0,
+            },
+            source_available: true,
+            target: EndpointLease {
+                endpoint_id: successor.clone(),
+                generation: 1,
+                boot_id: "local-boot".into(),
+                minimum_revision: 0,
+            },
+            focus: target.clone(),
+            host_focused: true,
+            resize: crate::protocol::ClientMessage::ClientShellResize {
+                cell_width_px: 8,
+                cell_height_px: 16,
+                surface_size: crate::protocol::ClientSurfaceSize { cols: 80, rows: 24 },
+                pixel_mouse: false,
+            },
+            phase: ActivationPhase::AwaitingPresentationEffects {
+                lease: EndpointLease {
+                    endpoint_id: ClientEndpointId::Local,
+                    generation: 1,
+                    boot_id: "local-boot".into(),
+                    minimum_revision: 0,
+                },
+                token: "20:1:local-boot".into(),
+                ready: true,
+                completion: Box::new(ActivationCompletion::RestoredSource {
+                    error: "endpoint handoff superseded by a newer selection".into(),
+                    successor: Some(intent.clone()),
+                }),
+            },
+            deadline: Instant::now() + ACTIVATION_TIMEOUT,
+            epoch: 20,
+            next_focus_serial: 0,
+            rollback_error: Some("endpoint handoff superseded by a newer selection".into()),
+            successor: Some(intent),
+        }
+    }
 }
 
 #[cfg(test)]

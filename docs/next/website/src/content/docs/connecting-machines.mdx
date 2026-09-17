@@ -37,7 +37,9 @@ herdr machine add workbox --label "Build machine" --remote-session agents
 
 Herdr checks both the installed binary and the running server. It starts the requested background server before saving the profile. Compatible client and server versions do not have to match. Missing or incompatible installations go through an approval-based setup. When the running server needs replacement, setup asks before stopping it and its pane processes, then starts the compatible server. The default answer is No. If installation and replacement are both needed, one confirmation covers them. `machine add` does not use experimental live handoff. Cancelling or failing setup leaves the profile unsaved.
 
-Run `herdr` to open the UI. If a local client is already open, added and enabled machines normally appear within a second and connect in the background without changing your selection. An in-progress machine switch finishes before profile changes are applied. The remote server keeps running after setup exits.
+Run `herdr` to open the UI. If a local client is already open, added and enabled machines that are allowed in that client's local session normally appear within a second and connect in the background without changing your selection. An in-progress machine switch finishes before profile changes are applied. The remote server keeps running after setup exits.
+
+A new profile is unrestricted until you set availability. Open clients can connect in that window. If you do not want that initial connection, close the relevant local clients while you add and restrict the machine.
 
 ## Switch between machines
 
@@ -69,13 +71,41 @@ For scripts, add `--json` to `machine list`.
 
 Renaming changes the displayed label without reconnecting. Disabling keeps the profile for later; removing forgets it. Both disconnect only that machine from the client and leave its remote sessions and agents running, even if the host is unreachable.
 
-Removing or disabling the machine you are viewing returns you to Local. If Local is unavailable, Herdr shows that and retries its connection instead of selecting a different remote machine. With enabled saved machines, the client can remain usable even if Local fails or restarts.
+Removing or disabling the machine you are viewing returns you to Local. If Local is unavailable, Herdr shows that and retries its connection instead of selecting a different remote machine. With enabled saved machines that are allowed in this local session, the client can remain usable even if Local fails or restarts.
+
+A locally allowed disabled profile stays in the sidebar as Disabled and does not start a connection. A profile that is not allowed in this local session is omitted from the client catalog.
+
+## Local-session availability
+
+Availability is local configuration, not a security boundary. It limits which local Herdr sessions can use a saved SSH machine. It does not change the remote session on the SSH host.
+
+The local session is `HERDR_SESSION` when that variable is set, otherwise `default`. Named sessions such as `sandbox` are local. The saved `session` field is the remote Herdr session on the SSH host.
+
+```bash
+herdr machine availability <profile-id> --local-session default
+herdr machine availability <profile-id> --local-session default --local-session sandbox
+herdr machine availability <profile-id> --all-local-sessions
+herdr machine availability <profile-id> --no-local-sessions
+```
+
+`--all-local-sessions` omits `local_sessions` (unrestricted). `--no-local-sessions` stores `[]` (no local session). One or more `--local-session` flags store an allowlist. Names use the same rules as local session names and may name a session that does not exist yet. At most 64 names are accepted before sort and dedup.
+
+`machine list` and `machine list --json` show every raw profile. `available` and `selected` are for the current local session. In `machine list --json`, `local_sessions` is `null` when unrestricted, `[]` when allowed in no local session, and an array of names when restricted. See [CLI reference](/docs/cli-reference/#saved-ssh-machines).
+
+`--machine` uses that same current local session after the raw enabled-profile match. An ineligible machine or invalid inherited `HERDR_SESSION` fails with usage error 2 before SSH. Explicit `herdr --remote <target>` is exempt: it still uses a raw enabled target and remote-session match even when the profile is restricted locally.
+
+An invalid inherited local session with a socket override starts Local-only. Saved machines are not loaded, the catalog watcher does not start, and scoped selection files are not written. The existing notice surface shows the validation error. Plain socket API commands keep their existing override behavior.
+
+Each local session stores its selected machine in `endpoint-selections/session-<lowercase hex of the session-name bytes>.json`. Examples: `default` is `session-64656661756c74.json`; `Default` is `session-44656661756c74.json`; `sandbox` is `session-73616e64626f78.json`. For the exact lowercase name `default` only, a missing scoped file may read the older `endpoint-selection.json`. Named sessions, including `Default`, do not import that legacy file or the catalog's embedded selection. Selecting a machine in the UI writes the scoped file. Automatic fallback, recovery, and reconnect keep the last explicit choice on disk and do not steal focus when a machine is reallowed. Deleting a named local session does not remove these shared client files; recreating the same name reuses them.
+
+Writes to the shared catalog omit `local_sessions` when unrestricted. Older strict readers reject a catalog that includes the field, including an empty list. Before downgrade, run `--all-local-sessions` on restricted profiles. Writes also clear a globally invalid embedded selected profile; a read does not rewrite the file.
 
 ## Connection problems
 
 - **Reconnecting:** Herdr retries automatically after a network interruption, sleep, or SSH failure. Repeated failures increase the delay up to two minutes; brief successful connections do not reset it. A connection must remain healthy for a minute before the next interruption gets a fast retry. SSH connections are checked for application-level activity and probed when quiet, so a broken connection does not stay Online indefinitely. Local detects native connection closure or failure instead of using remote health probes.
 - **Attention:** The target needs an action that cannot be completed in the background, such as host-key approval, authentication, or a compatible server. Other machines remain usable.
-- **Saved-machine file error:** An unreadable or invalid catalog leaves current connections unchanged. Herdr shows a notice and automatically retries reading it.
+- **Saved-machine file error at startup:** An unreadable or invalid catalog starts with no saved machines and a notice. Local still attaches when its socket is available.
+- **Saved-machine file error while running:** A catalog read error does not itself change connections. A valid reload already observed may still apply between surface handoffs. Herdr shows a notice and keeps the latest valid observation. A later error does not drop a pending valid reload. The watcher reads about once per second. A pending valid reload pauses new connection attempts until that observation is applied.
 
 When both installations support bridge idle cleanup, saved-machine connections to Linux and macOS also close their remote bridge after a minute without traffic in either direction. Sleep counts toward that deadline, which is checked when the host wakes. Quiet healthy connections exchange health checks; watching continuous output does not require typing. Cleanup leaves the remote Herdr server, sessions, and pane processes running. Older installations remain compatible without this optional cleanup.
 
@@ -99,7 +129,7 @@ Workspace, tab, pane IDs, and agent names are scoped to one server. Two machines
 
 ## Updates and saved data
 
-Saved profiles contain only an opaque ID, label, SSH target, explicit remote session, and enabled state. Herdr does not store passwords, private keys, agent tickets, or SSH control sockets in the catalog. Authentication stays with OpenSSH.
+Saved profiles contain an opaque ID, label, SSH target, explicit remote session, enabled state, and optional `local_sessions` list. Herdr does not store passwords, private keys, agent tickets, or SSH control sockets in the catalog. Authentication stays with OpenSSH.
 
 The client and server negotiate compatibility rather than requiring identical versions. Saved-machine connections additionally need the server's `surface_interest` and `health_check` capabilities. Older servers without those capabilities show Attention until explicitly updated, even if a standalone attach works. Other missing server methods disable only their corresponding actions.
 

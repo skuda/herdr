@@ -785,8 +785,13 @@ fn main() -> io::Result<()> {
     let loaded_config = config::Config::load();
     exit_if_nested_disabled(&loaded_config.config);
 
-    let saved_federation =
-        client::endpoint::EndpointCatalog::load().is_ok_and(|catalog| catalog.has_enabled_ssh());
+    let saved_federation = match crate::session::validated_local_session_name() {
+        Ok(local_session) => {
+            client::endpoint::EndpointCatalog::load_profiles_for_local_session(&local_session)
+                .is_ok_and(|profiles| profiles.iter().any(|profile| profile.enabled))
+        }
+        Err(_) => false,
+    };
     if let Err(err) = server::autodetect::auto_detect_launch(saved_federation) {
         eprintln!("herdr: {err}");
         std::process::exit(1);

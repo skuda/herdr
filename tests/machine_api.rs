@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -166,12 +166,99 @@ impl Harness {
             .to_string_lossy()
             .starts_with("herdr-api-")));
     }
+
+    fn assert_no_machine_connection(&self) {
+        self.assert_local_untouched();
+        assert!(!self.root.join("ssh-args").exists());
+        assert_eq!(
+            self.remote.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    fn catalog_path(&self) -> PathBuf {
+        let app = if cfg!(debug_assertions) {
+            "herdr-dev"
+        } else {
+            "herdr"
+        };
+        self.root.join("state").join(app).join("client")
+    }
+
+    fn write_catalog(&self, body: Value) {
+        fs::write(
+            self.catalog_path().join("endpoints.json"),
+            serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn write_selection(&self, name: &str, body: Value) {
+        let dir = self.catalog_path().join("endpoint-selections");
+        fs::create_dir_all(&dir).unwrap();
+        let file = if name == "default" {
+            "session-64656661756c74.json".to_string()
+        } else {
+            encoded_selection_file(name)
+        };
+        fs::write(dir.join(file), serde_json::to_vec(&body).unwrap()).unwrap();
+    }
+
+    fn write_legacy_selection(&self, body: Value) {
+        fs::write(
+            self.catalog_path().join("endpoint-selection.json"),
+            serde_json::to_vec(&body).unwrap(),
+        )
+        .unwrap();
+    }
+}
+
+fn encoded_selection_file(name: &str) -> String {
+    let mut encoded = String::from("session-");
+    for byte in name.as_bytes() {
+        encoded.push_str(&format!("{byte:02x}"));
+    }
+    encoded.push_str(".json");
+    encoded
 }
 
 impl Drop for Harness {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+fn bounded_output(mut command: Command) -> Output {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = command.spawn().expect("spawn machine command");
+    let timeout = Duration::from_secs(5);
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Ok(None) => {
+                let _ = child.kill();
+                let output = child.wait_with_output().unwrap_or_else(|error| {
+                    panic!("failed to collect timed-out machine command: {error}")
+                });
+                panic!(
+                    "machine command exceeded {timeout:?} without exiting; unexpected SSH/dispatch? stdout={} stderr={}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            Err(error) => panic!("failed to wait for machine command: {error}"),
+        }
+    }
+    child
+        .wait_with_output()
+        .expect("collect machine command output")
 }
 
 fn success(output: Output) -> Value {
@@ -401,4 +488,209 @@ fn machine_api_protocol_mismatch_never_sends_the_mutation() {
     assert!(error.contains("machine 'mac'"), "{error}");
     assert!(!error.contains("HERDR_SOCKET_PATH="), "{error}");
     harness.assert_local_untouched();
+}
+
+#[test]
+fn machine_api_rejects_disallowed_and_invalid_context_without_ssh() {
+    let harness = Harness::new();
+    harness.write_catalog(json!({
+        "version": 1,
+        "ssh": [{
+            "id": PROFILE_ID,
+            "label": "mac",
+            "target": "fake-mac",
+            "session": "fleet",
+            "enabled": true,
+            "local_sessions": ["default"]
+        }]
+    }));
+
+    let mut disallowed_cmd = harness.command(&["--machine", "mac", "agent", "list"]);
+    disallowed_cmd.env("HERDR_SESSION", "sandbox");
+    let disallowed = bounded_output(disallowed_cmd);
+    assert_eq!(disallowed.status.code(), Some(2));
+    let disallowed_err = String::from_utf8_lossy(&disallowed.stderr);
+    assert!(
+        disallowed_err.contains("not available in local session sandbox"),
+        "{disallowed_err}"
+    );
+    assert!(
+        disallowed_err.contains("machine availability"),
+        "{disallowed_err}"
+    );
+    harness.assert_no_machine_connection();
+
+    let mut invalid_cmd = harness.command(&["--machine", "mac", "agent", "list"]);
+    invalid_cmd.env("HERDR_SESSION", "bad/name");
+    let invalid = bounded_output(invalid_cmd);
+    assert_eq!(invalid.status.code(), Some(2));
+    let invalid_err = String::from_utf8_lossy(&invalid.stderr);
+    assert!(invalid_err.contains("session name"), "{invalid_err}");
+    harness.assert_no_machine_connection();
+}
+
+#[test]
+fn machine_list_rejects_invalid_inherited_context_with_socket_override() {
+    let harness = Harness::new();
+    let mut list_cmd = harness.command(&["machine", "list", "--json"]);
+    list_cmd.env("HERDR_SESSION", "bad/name");
+    let output = bounded_output(list_cmd);
+    assert_eq!(output.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(err.contains("session name"), "{err}");
+    harness.assert_no_machine_connection();
+}
+
+#[test]
+fn machine_api_disabled_and_ambiguous_errors_precede_availability() {
+    let harness = Harness::new();
+    harness.write_catalog(json!({
+        "version": 1,
+        "ssh": [
+            {
+                "id": PROFILE_ID,
+                "label": "mac",
+                "target": "fake-mac",
+                "session": "fleet",
+                "enabled": false,
+                "local_sessions": ["default"]
+            },
+            {
+                "id": "fedcba9876543210fedcba9876543210",
+                "label": "mac",
+                "target": "other-mac",
+                "session": "fleet",
+                "enabled": true,
+                "local_sessions": ["default"]
+            }
+        ]
+    }));
+    let disabled = harness
+        .command(&["--machine", PROFILE_ID, "agent", "list"])
+        .env("HERDR_SESSION", "sandbox")
+        .output()
+        .unwrap();
+    assert_eq!(disabled.status.code(), Some(2));
+    let disabled_err = String::from_utf8_lossy(&disabled.stderr);
+    assert!(disabled_err.contains("is disabled"), "{disabled_err}");
+    assert!(!disabled_err.contains("not available"), "{disabled_err}");
+
+    let ambiguous = harness
+        .command(&["--machine", "mac", "agent", "list"])
+        .env("HERDR_SESSION", "sandbox")
+        .output()
+        .unwrap();
+    assert_eq!(ambiguous.status.code(), Some(2));
+    let ambiguous_err = String::from_utf8_lossy(&ambiguous.stderr);
+    assert!(ambiguous_err.contains("ambiguous"), "{ambiguous_err}");
+    harness.assert_no_machine_connection();
+}
+
+#[test]
+fn machine_list_json_uses_raw_profiles_and_scoped_preference() {
+    let harness = Harness::new();
+    let enabled_id = PROFILE_ID;
+    let disabled_id = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let disallowed_id = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    harness.write_catalog(json!({
+        "version": 1,
+        "selected_profile": enabled_id,
+        "ssh": [
+            {
+                "id": enabled_id,
+                "label": "one",
+                "target": "one",
+                "session": "fleet",
+                "enabled": true,
+                "local_sessions": ["default", "sandbox"]
+            },
+            {
+                "id": disabled_id,
+                "label": "two",
+                "target": "two",
+                "session": "fleet",
+                "enabled": false
+            },
+            {
+                "id": disallowed_id,
+                "label": "three",
+                "target": "three",
+                "session": "fleet",
+                "enabled": true,
+                "local_sessions": ["sandbox"]
+            }
+        ]
+    }));
+    harness.write_legacy_selection(json!({
+        "version": 1,
+        "selected_profile": disallowed_id
+    }));
+    harness.write_selection("default", json!({"version": 1, "selected_profile": null}));
+    let catalog_before = fs::read(harness.catalog_path().join("endpoints.json")).unwrap();
+    let legacy_before = fs::read(harness.catalog_path().join("endpoint-selection.json")).unwrap();
+    let scoped_before = fs::read(
+        harness
+            .catalog_path()
+            .join("endpoint-selections/session-64656661756c74.json"),
+    )
+    .unwrap();
+    assert!(!harness
+        .catalog_path()
+        .join("endpoint-selections")
+        .join(encoded_selection_file("sandbox"))
+        .exists());
+
+    let default_list = success(
+        harness
+            .command(&["machine", "list", "--json"])
+            .env_remove("HERDR_SESSION")
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(default_list.as_array().unwrap().len(), 3);
+    assert_eq!(default_list[0]["id"], enabled_id);
+    assert_eq!(default_list[0]["available"], true);
+    assert_eq!(default_list[0]["selected"], false);
+    assert_eq!(default_list[1]["id"], disabled_id);
+    assert_eq!(default_list[1]["available"], false);
+    assert_eq!(default_list[1]["selected"], false);
+    assert_eq!(default_list[2]["id"], disallowed_id);
+    assert_eq!(default_list[2]["available"], false);
+    assert_eq!(default_list[2]["selected"], false);
+
+    let named_list = success(
+        harness
+            .command(&["machine", "list", "--json"])
+            .env("HERDR_SESSION", "sandbox")
+            .output()
+            .unwrap(),
+    );
+    assert_eq!(named_list[0]["available"], true);
+    assert_eq!(named_list[0]["selected"], false);
+    assert_eq!(named_list[1]["available"], false);
+    assert_eq!(named_list[2]["available"], true);
+    assert_eq!(named_list[2]["selected"], false);
+
+    assert_eq!(
+        fs::read(harness.catalog_path().join("endpoints.json")).unwrap(),
+        catalog_before
+    );
+    assert_eq!(
+        fs::read(harness.catalog_path().join("endpoint-selection.json")).unwrap(),
+        legacy_before
+    );
+    assert_eq!(
+        fs::read(
+            harness
+                .catalog_path()
+                .join("endpoint-selections/session-64656661756c74.json")
+        )
+        .unwrap(),
+        scoped_before
+    );
+    assert!(!harness
+        .catalog_path()
+        .join("endpoint-selections")
+        .join(encoded_selection_file("sandbox"))
+        .exists());
 }

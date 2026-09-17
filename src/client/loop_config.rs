@@ -13,4 +13,6 @@ pub(super) struct ClientLoopConfig {
     pub(super) remote_image_paste_key:
         Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
     pub(super) shell_config: Option<shell::ClientShellConfig>,
+    pub(super) local_session: Option<String>,
+    pub(super) local_session_error: Option<String>,
 }

@@ -49,18 +49,27 @@ herdr api schema --output herdr-api.schema.json
 
 ```bash
 herdr machine list
+herdr machine list --json
 herdr machine add workbox --label "Build machine"
 herdr machine rename <profile-id> --label "New name"
 herdr machine disable <profile-id>
 herdr machine enable <profile-id>
 herdr machine remove <profile-id>
+herdr machine availability <profile-id> --local-session default
+herdr machine availability <profile-id> --local-session default --local-session sandbox
+herdr machine availability <profile-id> --all-local-sessions
+herdr machine availability <profile-id> --no-local-sessions
 ```
 
-`machine add` 默认使用远程默认会话。只有需要命名会话时才添加 `--remote-session <name>`。`machine list` 支持可选的 `--json` 供脚本使用。完整流程见[连接机器](/zh-cn/docs/connecting-machines/)。
+`machine add` 默认使用远程默认会话。只有需要命名会话时才添加 `--remote-session <name>`。`machine list` 支持可选的 `--json` 供脚本使用。本地会话可用性见[本地会话可用性](/zh-cn/docs/connecting-machines/#本地会话可用性)。
+
+`machine availability` 要求配置 ID 写在标志之前。之后只取一种形式：一次或多次 `--local-session <name>`、`--all-local-sessions`，或 `--no-local-sessions`。可重复 `--local-session`，或使用 `--local-session=name`。不要混用这些形式。`--local-session` 名称与本地会话名相同：ASCII 字母、数字、`.`、`_`、`-`；1 到 64 字节；不能是 `.` 或 `..`。名称不必已经存在。排序和去重前最多 64 个。`--all-local-sessions` 省略限制。`--no-local-sessions` 保存空列表。
 
 `machine add` 会检查远程 Herdr 是否具备所需能力，仅在必要时征得批准后安装或更新，并在保存配置前启动指定会话的后台服务器。只要兼容，发行版本不必一致。需要批准安装或重启时，请在交互式终端中运行；设置失败或取消时不会保存配置。替换运行中的服务器需要明确批准，默认回答为 No；停止服务器会结束其窗格进程。`machine add` 不会隐式启用实验性实时交接。
 
-更改会自动应用到已打开的本地 Herdr 客户端，通常在一秒内生效。新增或启用的机器在后台连接；重命名不会重新连接。移除或禁用只会断开该机器，远程会话仍会继续运行。移除正在查看的机器会返回 Local；如果 Local 不可用，则显示不可用状态，直到重新连接。每份配置在客户端状态文件中保存一个不透明 ID、标签、SSH 目标、明确的远程会话名和启用状态。Herdr 不保存密码、私钥或其他 SSH 凭据。
+更改会自动应用到已打开的本地 Herdr 客户端，通常在一秒内生效。该客户端本地会话允许的新增或已启用机器会在后台连接；重命名不会重新连接。本地允许的已禁用行仍可见，但不会连接。移除或禁用只会断开该机器，远程会话仍会继续运行。移除正在查看的机器会返回 Local；如果 Local 不可用，则显示不可用状态，直到重新连接。每份配置在客户端状态文件中保存一个不透明 ID、标签、SSH 目标、明确的远程会话名、启用状态，以及可选的 `local_sessions` 列表。Herdr 不保存密码、私钥或其他 SSH 凭据。
+
+`machine list` 读取原始目录，不会隐藏受限制的配置。文本列为 id、label、target、session、enabled 或 disabled、availability（`all`、`none` 或允许的本地会话名）、available 或 unavailable、selected 或 unselected。`--json` 使用 `id`、`label`、`target`、`session`、`enabled`、`local_sessions`、`available`、`selected`。`available` 和 `selected` 针对当前本地会话：设置了 `HERDR_SESSION` 时用该值，否则为 `default`。该本地会话不是 SSH 主机上保存的远程会话。在 `machine list --json` 中，无限制时 `local_sessions` 为 `null`，不允许任何本地会话时为 `[]`，有限制时为名称数组。
 
 自动连接和重连均为非交互式。如果主机密钥、密码、密钥口令、MFA、安装、更新或重启需要批准，机器会显示 Attention，而不会打开隐藏的提示。请运行 Herdr 显示的独立连接命令，例如 `herdr --remote workbox`，在前台完成设置后重启客户端。仅当配置指向命名会话时，才加上 `--session <name>`。
 
@@ -73,7 +82,7 @@ herdr --machine "Build machine" agent prompt w1:p1 "review this change"
 herdr --machine "Build machine" worktree create --cwd /srv/project --branch review
 ```
 
-选择器必须是已启用的配置 ID 或唯一标签（区分大小写），不能是任意 SSH 主机名。命令使用保存的远程会话，不能与 `--session` 或 `--remote` 混用。省略前缀时，本地行为保持不变。
+选择器必须是已启用的配置 ID 或唯一标签（区分大小写），不能是任意 SSH 主机名。完成该原始匹配后，配置还必须在当前本地会话中可用。已禁用配置会先返回用法错误。不符合条件或继承的 `HERDR_SESSION` 无效时，会在 SSH 之前以用法错误 2 失败。不能与 `--session` 或 `--remote` 混用。命令使用保存的远程会话。省略前缀时，本地行为保持不变。显式的 `herdr --remote` 是独立路径，仍使用原始的已启用目标和远程会话匹配。
 
 支持 `workspace`、`worktree`、`tab`、`pane`、`notification`、`agent`（不含 `attach` 和本地 `explain --file`）、`api snapshot`、`status server`，以及基于 API 的插件操作（`link`、`unlink`、`enable`、`disable`、`list`、`action`、`log`、`pane`）。服务器操作支持 `stop`、`reload-config`、`agent-manifests`、`reload-agent-manifests`。本地安装和配置、插件安装、会话管理及交互式终端连接不会被转发。
 

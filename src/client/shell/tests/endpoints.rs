@@ -14,6 +14,7 @@ fn remote_profile() -> SavedSshEndpoint {
         target: "dev@build.example".into(),
         session: "agents".into(),
         enabled: true,
+        local_sessions: None,
     }
 }
 
@@ -2386,4 +2387,44 @@ fn navigator_foreign_tab_selection_keeps_the_tab_target() {
             target: Some(ClientEndpointFocusTarget::Tab(tab_id)),
         }] if activated == &endpoint_id && tab_id == "tab_1"
     ));
+}
+
+#[test]
+fn locally_allowed_disabled_rows_remain_visible_without_connections() {
+    let mut state = ClientShellState::new(ClientShellConfig::from_config(&Config::default()));
+    let mut profile = remote_profile();
+    profile.enabled = false;
+    profile.local_sessions = Some(vec!["default".into()]);
+    let mut catalog = crate::client::endpoint::EndpointCatalog::default();
+    catalog.ssh = vec![profile.clone()];
+    state.set_endpoint_catalog(&catalog.profiles_for_local_session("default"));
+    let remote = ClientEndpointId::Ssh(profile.id.clone());
+    assert_eq!(
+        state.endpoint_status(&remote),
+        Some(ClientEndpointStatus::Disabled)
+    );
+    profile.local_sessions = Some(vec!["sandbox".into()]);
+    catalog.ssh = vec![profile];
+    state.set_endpoint_catalog(&catalog.profiles_for_local_session("default"));
+    assert!(state.endpoint_status(&remote).is_none());
+}
+
+#[test]
+fn invalid_federation_context_uses_local_only_with_notice() {
+    let (mut state, remote) = state_with_remote();
+    let error = "session name cannot be empty";
+    crate::client::apply_invalid_local_session_notice(&mut state, Some(error));
+    state.set_endpoint_catalog(&[]);
+    assert!(state.endpoint_status(&remote).is_none());
+    assert!(state.endpoint_status(&ClientEndpointId::Local).is_some());
+    let frame = state.compose(100, 28).expect("local-only notice frame");
+    let text = frame
+        .cells
+        .iter()
+        .map(|cell| cell.symbol.as_str())
+        .collect::<String>();
+    assert!(
+        text.contains("Endpoint unavailable") || text.contains(error),
+        "{text}"
+    );
 }

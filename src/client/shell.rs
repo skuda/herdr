@@ -279,4 +279,40 @@ fn blit_pane_surface(target: &mut FrameData, source: &FrameData, area: Rect) {
 }
 
 #[cfg(test)]
+impl ClientShellState {
+    pub(crate) fn test_with_projected_profiles(
+        profiles: &[SavedSshEndpoint],
+        projected: &ClientEndpointId,
+    ) -> Self {
+        let mut state = Self::new(ClientShellConfig::from_config(&Config::default()));
+        state.set_endpoint_catalog(profiles);
+        for profile in profiles {
+            let endpoint_id = ClientEndpointId::Ssh(profile.id.clone());
+            state.set_endpoint_status(&endpoint_id, ClientEndpointStatus::Online);
+            let mut snapshot = tests::snapshot();
+            let slug = profile.label.to_ascii_lowercase();
+            snapshot.boot_id = format!("{slug}-boot");
+            snapshot.workspaces[0].label = format!("{slug}-workspace");
+            state.set_endpoint_snapshot(&endpoint_id, Box::new(snapshot));
+        }
+        assert!(
+            state.activate_endpoint_projection(projected),
+            "projected endpoint must be online with a snapshot"
+        );
+        let mut surface = tests::surface();
+        if let Some(boot_id) = state.endpoint_boot_id(projected) {
+            surface.boot_id = boot_id.to_owned();
+        }
+        state.set_pane_surface(surface);
+        state
+    }
+
+    pub(crate) fn test_install_projected_surface(&mut self, boot_id: &str) {
+        let mut surface = tests::surface();
+        surface.boot_id = boot_id.to_owned();
+        self.set_pane_surface(surface);
+    }
+}
+
+#[cfg(test)]
 mod tests;
