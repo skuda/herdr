@@ -23,12 +23,21 @@ pub(super) enum ClientLoopEvent {
     },
     EndpointSupervisor(endpoint::EndpointSupervisorEvent),
     EndpointCatalog(Result<Vec<endpoint::SavedSshEndpoint>, String>),
-    ActivateEndpoint {
-        endpoint_id: endpoint::ClientEndpointId,
-        target: Option<shell::ClientEndpointFocusTarget>,
-        /// A superseded handoff deliberately starts a fresh target-on epoch even when source and
-        /// latest target have the same identity after restoration.
-        force: bool,
-    },
+    ActivateEndpoint(ActivationRequest),
     Timer,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum SelectionPersistence {
+    Explicit,
+    Preserve,
+}
+
+pub(super) struct ActivationRequest {
+    pub(super) endpoint_id: endpoint::ClientEndpointId,
+    pub(super) target: Option<shell::ClientEndpointFocusTarget>,
+    /// A superseded handoff deliberately starts a fresh target-on epoch even when source and
+    /// latest target have the same identity after restoration.
+    pub(super) force: bool,
+    pub(super) persistence: SelectionPersistence,
 }

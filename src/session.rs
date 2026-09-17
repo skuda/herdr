@@ -472,6 +472,19 @@ pub fn validate_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub fn validated_local_session_name() -> Result<String, String> {
+    match std::env::var_os(SESSION_ENV_VAR) {
+        None => Ok(DEFAULT_SESSION_NAME.to_string()),
+        Some(value) => {
+            let Some(name) = value.to_str() else {
+                return Err(format!("{SESSION_ENV_VAR} is not valid Unicode"));
+            };
+            validate_name(name)?;
+            Ok(name.to_string())
+        }
+    }
+}
+
 fn apply_explicit_name(name: &str) -> Result<(), String> {
     let session = normalize_name(name)?;
     if let Some(session) = session {
@@ -983,10 +996,63 @@ mod tests {
         assert!(!explicit_session_requested());
         assert_eq!(active_api_socket_path(), PathBuf::from("/tmp/herdr.sock"));
         assert_eq!(std::env::var(SESSION_ENV_VAR).as_deref(), Ok("bad/name"));
+        assert!(validated_local_session_name().is_err());
 
         std::env::remove_var(SESSION_ENV_VAR);
         clear_explicit_session_for_test();
         std::env::remove_var(crate::api::SOCKET_PATH_ENV_VAR);
+    }
+
+    #[test]
+    fn validated_local_session_name_uses_default_when_unset() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::remove_var(SESSION_ENV_VAR);
+
+        assert_eq!(
+            validated_local_session_name().unwrap(),
+            DEFAULT_SESSION_NAME
+        );
+    }
+
+    #[test]
+    fn validated_local_session_name_keeps_literal_default_and_named_sessions() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::set_var(SESSION_ENV_VAR, DEFAULT_SESSION_NAME);
+        assert_eq!(
+            validated_local_session_name().unwrap(),
+            DEFAULT_SESSION_NAME
+        );
+
+        std::env::set_var(SESSION_ENV_VAR, "sandbox");
+        assert_eq!(validated_local_session_name().unwrap(), "sandbox");
+
+        std::env::set_var(SESSION_ENV_VAR, "Default");
+        assert_eq!(validated_local_session_name().unwrap(), "Default");
+
+        std::env::remove_var(SESSION_ENV_VAR);
+    }
+
+    #[test]
+    fn validated_local_session_name_rejects_empty_invalid_and_non_unicode() {
+        let _guard = env_lock().lock().unwrap();
+        std::env::set_var(SESSION_ENV_VAR, "");
+        assert!(validated_local_session_name()
+            .unwrap_err()
+            .contains("cannot be empty"));
+
+        std::env::set_var(SESSION_ENV_VAR, "bad/name");
+        assert!(validated_local_session_name().is_err());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt as _;
+            std::env::set_var(SESSION_ENV_VAR, std::ffi::OsString::from_vec(vec![0xff]));
+            assert!(validated_local_session_name()
+                .unwrap_err()
+                .contains("not valid Unicode"));
+        }
+
+        std::env::remove_var(SESSION_ENV_VAR);
     }
 
     #[cfg(unix)]
@@ -1083,5 +1149,43 @@ mod tests {
         assert_eq!(names, vec![DEFAULT_SESSION_NAME, "work"]);
         std::fs::remove_dir_all(&config_home).unwrap();
         std::env::remove_var("XDG_CONFIG_HOME");
+    }
+
+    #[test]
+    fn session_name_reuse_retains_shared_preferences() {
+        let _guard = env_lock().lock().unwrap();
+        let root = std::env::temp_dir().join(format!("herdr-session-reuse-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::env::set_var("XDG_CONFIG_HOME", root.join("config"));
+        std::env::set_var("XDG_STATE_HOME", root.join("state"));
+        std::env::remove_var(SESSION_ENV_VAR);
+        clear_explicit_session_for_test();
+        let session_dir = data_dir_for(Some("sandbox"));
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let client = crate::config::state_dir().join("client");
+        std::fs::create_dir_all(client.join("endpoint-selections")).unwrap();
+        std::fs::write(
+            client.join("endpoints.json"),
+            r#"{"version":1,"ssh":[{"id":"0123456789abcdef0123456789abcdef","label":"Build","target":"build","session":"agents","enabled":true,"local_sessions":["sandbox"]}]}"#,
+        )
+        .unwrap();
+        let scoped = crate::client::endpoint::scoped_selection_path("sandbox").unwrap();
+        std::fs::write(
+            &scoped,
+            r#"{"version":1,"selected_profile":"0123456789abcdef0123456789abcdef"}"#,
+        )
+        .unwrap();
+        let catalog_before = std::fs::read(client.join("endpoints.json")).unwrap();
+        let scoped_before = std::fs::read(&scoped).unwrap();
+        delete_session("sandbox").unwrap();
+        assert!(!session_dir.exists());
+        assert_eq!(
+            std::fs::read(client.join("endpoints.json")).unwrap(),
+            catalog_before
+        );
+        assert_eq!(std::fs::read(&scoped).unwrap(), scoped_before);
+        std::fs::remove_dir_all(&root).unwrap();
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var("XDG_STATE_HOME");
     }
 }

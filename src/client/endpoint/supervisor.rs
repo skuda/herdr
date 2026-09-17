@@ -134,6 +134,23 @@ impl EndpointSupervisors {
         retired
     }
 
+    #[cfg(test)]
+    pub(crate) fn contains_ssh(&self, id: &ClientEndpointId) -> bool {
+        self.endpoints.contains_key(id)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ssh_generation(&self, id: &ClientEndpointId) -> Option<u64> {
+        self.endpoints.get(id).and_then(|state| state.generation)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_ssh_generation(&mut self, id: &ClientEndpointId, generation: u64) {
+        if let Some(state) = self.endpoints.get_mut(id) {
+            state.generation = Some(generation);
+        }
+    }
+
     pub(crate) fn spawn_due(
         &mut self,
         now: Instant,
@@ -373,6 +390,7 @@ mod tests {
             target: "build".into(),
             session: "agents".into(),
             enabled: true,
+            local_sessions: None,
         }
     }
 
@@ -536,5 +554,26 @@ mod tests {
         );
         assert!(supervisors.record_status(&endpoint_id, 4, ClientEndpointStatus::Attention, now));
         assert!(supervisors.endpoints[&endpoint_id].next_attempt.is_none());
+    }
+
+    #[test]
+    fn live_allowlist_reallow_does_not_restore_stale_generation() {
+        let now = Instant::now();
+        let mut profile = profile();
+        let id = ClientEndpointId::Ssh(profile.id.clone());
+        let mut supervisors = EndpointSupervisors::new(&[profile.clone()], now);
+        supervisors.endpoints.get_mut(&id).unwrap().generation = Some(7);
+        assert_eq!(supervisors.reconcile_profiles(&[], now), vec![id.clone()]);
+        assert!(!supervisors.record_status(&id, 7, ClientEndpointStatus::Online, now));
+        assert!(!supervisors.disconnected(&id, 7, now));
+        assert!(supervisors
+            .reconcile_profiles(&[profile.clone()], now)
+            .is_empty());
+        assert!(!supervisors.record_status(&id, 7, ClientEndpointStatus::Online, now));
+        assert_eq!(supervisors.endpoints[&id].generation, None);
+        assert_eq!(supervisors.endpoints[&id].next_attempt, Some(now));
+        profile.local_sessions = Some(vec!["default".into()]);
+        assert!(supervisors.reconcile_profiles(&[profile], now).is_empty());
+        assert_eq!(supervisors.endpoints[&id].generation, None);
     }
 }

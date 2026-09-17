@@ -1,6 +1,6 @@
-use clap::{Arg, Command};
+use clap::{Arg, ArgGroup, Command};
 
-use super::{json_flag, option};
+use super::{flag, json_flag, option, repeatable_option};
 
 pub(super) fn command() -> Command {
     Command::new("machine")
@@ -38,6 +38,36 @@ pub(super) fn command() -> Command {
         .subcommand(profile_command("remove", "Remove a saved SSH machine"))
         .subcommand(profile_command("enable", "Enable a saved SSH machine"))
         .subcommand(profile_command("disable", "Disable a saved SSH machine"))
+        .subcommand(
+            profile_command(
+                "availability",
+                "Limit a saved SSH machine to specific local sessions",
+            )
+            .mut_arg("profile-id", |arg| {
+                arg.value_parser(|id: &str| {
+                    crate::client::endpoint::ProfileId::parse(id).map(|id| id.to_string())
+                })
+                .help("Put <profile-id> before availability options.")
+            })
+            .arg(
+                repeatable_option("local-session", "NAME")
+                    .value_parser(|name: &str| {
+                        crate::session::validate_name(name).map(|()| name.to_string())
+                    })
+                    .help("Allow this machine only in these local sessions"),
+            )
+            .arg(flag("all-local-sessions").help("Allow this machine in every local session"))
+            .arg(flag("no-local-sessions").help("Allow this machine in no local session"))
+            .group(
+                ArgGroup::new("availability")
+                    .args(["local-session", "all-local-sessions", "no-local-sessions"])
+                    .required(true),
+            )
+            .override_usage(
+                "herdr machine availability <profile-id> (--local-session <name> [--local-session <name> ...] | --all-local-sessions | --no-local-sessions)",
+            )
+            .after_help("Put <profile-id> before availability options."),
+        )
 }
 
 fn profile_command(name: &'static str, about: &'static str) -> Command {

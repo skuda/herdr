@@ -257,6 +257,14 @@ impl EndpointCommands {
         }
         request_ids
     }
+
+    #[cfg(test)]
+    pub(super) fn queued_count(&self, endpoint_id: &ClientEndpointId) -> usize {
+        self.lanes
+            .get(endpoint_id)
+            .map(|lane| lane.queued.len())
+            .unwrap_or(0)
+    }
 }
 
 pub(super) fn parse_response(

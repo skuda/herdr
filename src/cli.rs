@@ -41,6 +41,11 @@ mod target;
 mod workspace;
 mod worktree;
 
+#[cfg(test)]
+pub(super) fn spec_command() -> clap::Command {
+    spec::command()
+}
+
 const TERMINAL_SESSION_OBSERVE_USAGE: &str =
     "usage: herdr terminal session observe <target> [--cols N] [--rows N]";
 const TERMINAL_SESSION_CONTROL_USAGE: &str =

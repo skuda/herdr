@@ -42,6 +42,9 @@ pub(super) fn maybe_run(args: &[String]) -> Option<io::Result<super::CommandOutc
             Ok(profile) => profile.clone(),
             Err(error) => return usage_error(error),
         };
+        if let Err(error) = reject_ineligible_machine(&profile, &selector) {
+            return usage_error(error);
+        }
         let _scope = TARGET.with(|target| {
             TargetScope(target.replace(Some(MachineTarget {
                 profile,
@@ -236,6 +239,17 @@ fn resolve_machine<'a>(
         return Err(format!("machine '{selector}' is disabled"));
     }
     Ok(profile)
+}
+
+fn reject_ineligible_machine(profile: &SavedSshEndpoint, selector: &str) -> Result<(), String> {
+    let local_session = crate::session::validated_local_session_name()?;
+    if profile.is_available_in(&local_session) {
+        Ok(())
+    } else {
+        Err(format!(
+            "machine '{selector}' is not available in local session {local_session}; use `herdr machine availability` or `herdr machine list`"
+        ))
+    }
 }
 
 fn validate_machine_command(args: &[String]) -> Result<(), String> {
