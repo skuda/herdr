@@ -97,6 +97,7 @@ fn add_remote(state: &mut ClientShellState) -> ClientEndpointId {
         target: "dev@build.example".into(),
         session: "agents".into(),
         enabled: true,
+        local_sessions: None,
     };
     let remote = ClientEndpointId::Ssh(profile.id.clone());
     state.set_endpoint_catalog(&[profile]);
@@ -287,10 +288,16 @@ fn local_selection_is_scheduled_ahead_of_a_full_event_queue() {
     )
     .unwrap();
     let next = scheduled.take().or_else(|| rx.try_recv().ok());
-    assert!(matches!(next, Some(ClientLoopEvent::ActivateEndpoint {
-        endpoint_id: ClientEndpointId::Local,
-        target: Some(ClientEndpointFocusTarget::Workspace(id)), ..
-    }) if id == "ws_1"));
+    assert!(matches!(
+        next,
+        Some(ClientLoopEvent::ActivateEndpoint(
+            crate::client::events::ActivationRequest {
+                endpoint_id: ClientEndpointId::Local,
+                target: Some(ClientEndpointFocusTarget::Workspace(id)),
+                ..
+            }
+        )) if id == "ws_1"
+    ));
     assert!(matches!(rx.try_recv(), Ok(ClientLoopEvent::Timer)));
 }
 

@@ -92,6 +92,7 @@ fn shell_and_registry_with_source_failure(source_fail_after_write: bool) -> Test
         target: "dev@example.com".into(),
         session: "main".into(),
         enabled: true,
+        local_sessions: None,
     };
     let target = ClientEndpointId::Ssh(profile.id.clone());
     shell.set_endpoint_catalog(&[profile]);
@@ -1321,11 +1322,12 @@ fn local_selection_waits_for_fresh_metadata_without_abandoning_remote() {
                 Box::new(test_snapshot("local-boot", 1)),
             );
         let event = take_ready_local_activation(&mut state, &endpoints).unwrap();
-        let ClientLoopEvent::ActivateEndpoint {
+        let ClientLoopEvent::ActivateEndpoint(crate::client::events::ActivationRequest {
             endpoint_id,
             target,
             force,
-        } = event
+            ..
+        }) = event
         else {
             panic!("expected retained Local selection");
         };
@@ -1596,11 +1598,12 @@ fn notification_click_on_remote_source_supersedes_a_handoff() {
         &mut scheduled,
     )
     .unwrap();
-    let ClientLoopEvent::ActivateEndpoint {
+    let ClientLoopEvent::ActivateEndpoint(crate::client::events::ActivationRequest {
         endpoint_id,
         target,
         force,
-    } = scheduled.expect("click must reach the handoff manager")
+        ..
+    }) = scheduled.expect("click must reach the handoff manager")
     else {
         panic!("activation expected");
     };
