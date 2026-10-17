@@ -40,11 +40,13 @@ pub(super) fn dispatch_client_shell_actions(
                 endpoint_id,
                 target,
             } => {
-                *scheduled_activation = Some(ClientLoopEvent::ActivateEndpoint {
-                    endpoint_id,
-                    target,
-                    force: false,
-                });
+                *scheduled_activation =
+                    Some(ClientLoopEvent::ActivateEndpoint(ActivationRequest {
+                        endpoint_id,
+                        target,
+                        force: false,
+                        persistence: SelectionPersistence::Explicit,
+                    }));
             }
             shell::ClientShellAction::OpenSafeWebUrl(url) => {
                 if crate::app::actions::safe_web_url(&url).is_some() {
@@ -182,6 +184,75 @@ fn install_pending_activation(
     *pending = Some(activation);
 }
 
+pub(super) fn accept_endpoint_activation(
+    catalog: &mut endpoint::EndpointCatalog,
+    state: &mut ClientState,
+    endpoints: &mut endpoint::EndpointRegistry,
+    endpoint_commands: &mut endpoint_commands::EndpointCommands,
+    pending: &mut Option<endpoint::PendingEndpointActivation>,
+    next_surface_serial: &mut u64,
+    request: ActivationRequest,
+    local_session: Option<&str>,
+    now: std::time::Instant,
+    scheduled_activation: &mut Option<ClientLoopEvent>,
+) -> Result<bool, ClientError> {
+    let persist = request.persistence == SelectionPersistence::Explicit;
+    let selection_path = persist
+        .then_some(local_session)
+        .flatten()
+        .and_then(|session| endpoint::scoped_selection_path(session).ok());
+    accept_endpoint_activation_with_path(
+        catalog,
+        state,
+        endpoints,
+        endpoint_commands,
+        pending,
+        next_surface_serial,
+        request,
+        local_session,
+        selection_path.as_deref(),
+        now,
+        scheduled_activation,
+    )
+}
+
+fn accept_endpoint_activation_with_path(
+    catalog: &mut endpoint::EndpointCatalog,
+    state: &mut ClientState,
+    endpoints: &mut endpoint::EndpointRegistry,
+    endpoint_commands: &mut endpoint_commands::EndpointCommands,
+    pending: &mut Option<endpoint::PendingEndpointActivation>,
+    next_surface_serial: &mut u64,
+    request: ActivationRequest,
+    local_session: Option<&str>,
+    selection_path: Option<&std::path::Path>,
+    now: std::time::Instant,
+    scheduled_activation: &mut Option<ClientLoopEvent>,
+) -> Result<bool, ClientError> {
+    let persist = request.persistence == SelectionPersistence::Explicit;
+    if !catalog.apply_activation_selection_to_path(
+        &request.endpoint_id,
+        persist,
+        local_session,
+        selection_path,
+    ) {
+        return Ok(false);
+    }
+    begin_endpoint_activation(
+        state,
+        endpoints,
+        endpoint_commands,
+        pending,
+        next_surface_serial,
+        request.endpoint_id,
+        request.target,
+        request.force,
+        now,
+        scheduled_activation,
+    )?;
+    Ok(true)
+}
+
 fn local_activation_metadata_ready(
     state: &ClientState,
     endpoints: &endpoint::EndpointRegistry,
@@ -207,14 +278,14 @@ pub(super) fn take_ready_local_activation(
     if !local_activation_metadata_ready(state, endpoints) {
         return None;
     }
-    state
-        .deferred_local_activation
-        .take()
-        .map(|intent| ClientLoopEvent::ActivateEndpoint {
+    state.deferred_local_activation.take().map(|intent| {
+        ClientLoopEvent::ActivateEndpoint(ActivationRequest {
             endpoint_id: intent.endpoint_id,
             target: intent.target,
             force: false,
+            persistence: SelectionPersistence::Preserve,
         })
+    })
 }
 
 pub(super) fn begin_endpoint_activation(
@@ -469,11 +540,12 @@ pub(super) fn complete_endpoint_activation(
     }
     // A Local selection made while reconnecting is newer than this transaction's successor.
     if let Some(intent) = successor.filter(|_| state.deferred_local_activation.is_none()) {
-        return Ok(Some(ClientLoopEvent::ActivateEndpoint {
+        return Ok(Some(ClientLoopEvent::ActivateEndpoint(ActivationRequest {
             endpoint_id: intent.endpoint_id,
             target: intent.target,
             force: true,
-        }));
+            persistence: SelectionPersistence::Preserve,
+        })));
     }
     Ok(None)
 }
@@ -865,6 +937,8 @@ pub(super) fn finish_client_shell_input(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::endpoint::{ClientEndpointId, EndpointCatalog, ProfileId};
+    use std::time::Instant;
 
     #[test]
     fn host_color_reaches_server_before_first_snapshot() {
@@ -965,5 +1039,159 @@ mod tests {
                 },
             }
         );
+    }
+
+    #[test]
+    fn explicit_activation_persists_before_preflight() {
+        let parent =
+            std::env::temp_dir().join(format!("herdr-explicit-preflight-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&parent);
+        std::fs::create_dir_all(&parent).unwrap();
+        let selection_path = parent.join("default.json");
+        let mut catalog = EndpointCatalog::default();
+        let id = catalog.add_ssh("Build", "build", "agents").unwrap();
+        let retired = ProfileId::parse("fedcba9876543210fedcba9876543210").unwrap();
+        let mut state = ClientState::test_new();
+        let mut endpoints = endpoint::EndpointRegistry::empty();
+        let mut commands = endpoint_commands::EndpointCommands::default();
+        let mut pending = None;
+        let mut serial = 1;
+        let mut scheduled: Option<ClientLoopEvent> = None;
+        let accepted = accept_endpoint_activation_with_path(
+            &mut catalog,
+            &mut state,
+            &mut endpoints,
+            &mut commands,
+            &mut pending,
+            &mut serial,
+            ActivationRequest {
+                endpoint_id: ClientEndpointId::Ssh(id.clone()),
+                target: None,
+                force: false,
+                persistence: SelectionPersistence::Explicit,
+            },
+            Some("default"),
+            Some(&selection_path),
+            Instant::now(),
+            &mut scheduled,
+        )
+        .unwrap();
+        assert!(accepted);
+        let saved =
+            serde_json::from_slice::<serde_json::Value>(&std::fs::read(&selection_path).unwrap())
+                .unwrap();
+        assert_eq!(saved["selected_profile"], id.as_str());
+        let before = std::fs::read(&selection_path).unwrap();
+        let rejected = accept_endpoint_activation_with_path(
+            &mut catalog,
+            &mut state,
+            &mut endpoints,
+            &mut commands,
+            &mut pending,
+            &mut serial,
+            ActivationRequest {
+                endpoint_id: ClientEndpointId::Ssh(retired),
+                target: None,
+                force: false,
+                persistence: SelectionPersistence::Explicit,
+            },
+            Some("default"),
+            Some(&selection_path),
+            Instant::now(),
+            &mut scheduled,
+        )
+        .unwrap();
+        assert!(!rejected);
+        assert_eq!(std::fs::read(&selection_path).unwrap(), before);
+        std::fs::remove_dir_all(&parent).unwrap();
+    }
+
+    #[test]
+    fn successor_activation_preserves_intervening_scoped_preference() {
+        let parent =
+            std::env::temp_dir().join(format!("herdr-successor-preserve-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&parent);
+        std::fs::create_dir_all(&parent).unwrap();
+        let selection_path = parent.join("default.json");
+        let mut catalog = EndpointCatalog::default();
+        let other = catalog.add_ssh("Other", "other", "agents").unwrap();
+        std::fs::write(
+            &selection_path,
+            format!(r#"{{"version":1,"selected_profile":"{other}"}}"#),
+        )
+        .unwrap();
+        let before = std::fs::read(&selection_path).unwrap();
+
+        let mut state = ClientState::test_new();
+        let mut endpoints = endpoint::EndpointRegistry::empty();
+        let mut commands = endpoint_commands::EndpointCommands::default();
+        let mut pending = Some(endpoint::PendingEndpointActivation::test_ready_successor(
+            ClientEndpointId::Local,
+            Some(shell::ClientEndpointFocusTarget::Pane("local-pane".into())),
+        ));
+        let event =
+            complete_endpoint_activation(&mut state, &mut endpoints, &mut pending, &mut commands)
+                .unwrap()
+                .expect("successor activation");
+        let ClientLoopEvent::ActivateEndpoint(request) = event else {
+            panic!("complete_endpoint_activation must produce ActivateEndpoint");
+        };
+        assert_eq!(request.persistence, SelectionPersistence::Preserve);
+        assert!(request.force);
+        assert_eq!(request.endpoint_id, ClientEndpointId::Local);
+
+        let mut serial = 1;
+        let mut scheduled: Option<ClientLoopEvent> = None;
+        assert!(accept_endpoint_activation_with_path(
+            &mut catalog,
+            &mut state,
+            &mut endpoints,
+            &mut commands,
+            &mut pending,
+            &mut serial,
+            request,
+            Some("default"),
+            Some(&selection_path),
+            Instant::now(),
+            &mut scheduled,
+        )
+        .unwrap());
+        assert_eq!(std::fs::read(&selection_path).unwrap(), before);
+
+        // begin_endpoint_activation defers a Local activation while local metadata is not ready,
+        // and complete_endpoint_activation drops a successor while that deferral is set. This
+        // fixture has no Local connection, so clear the deferral before the second successor.
+        state.deferred_local_activation = None;
+
+        let absent_path = parent.join("sandbox.json");
+        assert!(!absent_path.exists());
+        pending = Some(endpoint::PendingEndpointActivation::test_ready_successor(
+            ClientEndpointId::Local,
+            Some(shell::ClientEndpointFocusTarget::Pane("local-pane".into())),
+        ));
+        let event =
+            complete_endpoint_activation(&mut state, &mut endpoints, &mut pending, &mut commands)
+                .unwrap()
+                .expect("successor activation");
+        let ClientLoopEvent::ActivateEndpoint(request) = event else {
+            panic!("complete_endpoint_activation must produce ActivateEndpoint");
+        };
+        assert_eq!(request.persistence, SelectionPersistence::Preserve);
+        assert!(accept_endpoint_activation_with_path(
+            &mut catalog,
+            &mut state,
+            &mut endpoints,
+            &mut commands,
+            &mut pending,
+            &mut serial,
+            request,
+            Some("sandbox"),
+            Some(&absent_path),
+            Instant::now(),
+            &mut scheduled,
+        )
+        .unwrap());
+        assert!(!absent_path.exists());
+        std::fs::remove_dir_all(&parent).unwrap();
     }
 }
